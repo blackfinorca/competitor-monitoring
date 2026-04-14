@@ -100,7 +100,7 @@ class ToolZoneScraper(CompetitorScraper):
         try:
             resp = polite_get(
                 self.http_client,
-                "https://www.toolzone.sk/vyhladavanie",
+                "https://www.toolzone.sk/vyhledavani/",
                 min_rps=self._rate_limit_rps,
                 referer="https://www.toolzone.sk/",
                 params={"search_query": query},

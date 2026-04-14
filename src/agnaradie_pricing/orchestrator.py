@@ -150,6 +150,20 @@ def search_product(
         logger.warning("ToolZone search failed: %s", exc)
         result.errors["toolzone_sk"] = str(exc)
 
+    # ToolZone's search results are JS-rendered (AJAX), so search_by_query often
+    # returns None even for products that exist. If we already know the product
+    # from a previous scrape, fetch its stored product-page URL directly — detail
+    # pages serve full JSON-LD and are not AJAX-dependent.
+    if tz_listing is None and product is not None:
+        stored_tz = _latest_tz_listing(product.id, session)
+        if stored_tz and stored_tz.url:
+            try:
+                tz_listing = toolzone_scraper._scrape_product_page(stored_tz.url)
+                if tz_listing:
+                    _progress(f"Refreshed ToolZone price from stored URL")
+            except Exception as exc:
+                logger.debug("Direct ToolZone URL fetch failed: %s", exc)
+
     if tz_listing is None and product is None:
         # Nothing on ToolZone and nothing in cache — dead end
         _progress("No results found on ToolZone.sk and nothing in cache.")
@@ -220,9 +234,16 @@ def _find_product(query: str, session: Session) -> Product | None:
         ).scalar_one_or_none()
 
     if kind == "mpn":
-        return session.execute(
+        product = session.execute(
             select(Product).where(func.lower(Product.mpn) == q.lower())
         ).scalar_one_or_none()
+        if product is None:
+            # Query looks like a SKU (e.g. "TZ-7102200") — the "TZ-" prefix is a
+            # store prefix, not part of the MPN, so also try an exact SKU lookup.
+            product = session.execute(
+                select(Product).where(func.lower(Product.sku) == q.lower())
+            ).scalar_one_or_none()
+        return product
 
     # Text search — try brand match first, then title
     pattern = f"%{q.lower()}%"
@@ -315,7 +336,7 @@ def _upsert_product(listing: CompetitorListing, session: Session) -> Product:
     # Prefer EAN match (most reliable)
     if listing.ean:
         existing = session.execute(
-            select(Product).where(Product.ean == listing.ean)
+            select(Product).where(Product.ean == listing.ean).limit(1)
         ).scalar_one_or_none()
 
     # Fall back to brand + MPN
@@ -324,15 +345,15 @@ def _upsert_product(listing: CompetitorListing, session: Session) -> Product:
             select(Product).where(
                 func.lower(Product.brand) == listing.brand.lower(),
                 func.lower(Product.mpn) == listing.mpn.lower(),
-            )
+            ).limit(1)
         ).scalar_one_or_none()
 
-    # Fall back to title match
+    # Fall back to title match (limit 1 — titles are not guaranteed unique)
     if existing is None and listing.title:
         existing = session.execute(
-            select(Product).where(
-                func.lower(Product.title) == listing.title.lower()
-            )
+            select(Product)
+            .where(func.lower(Product.title) == listing.title.lower())
+            .limit(1)
         ).scalar_one_or_none()
 
     if existing:
@@ -414,17 +435,17 @@ def _save_toolzone_listing(listing: CompetitorListing, session: Session) -> None
 def _find_product_for_tz_listing(listing: CompetitorListing, session: Session) -> Product | None:
     if listing.ean:
         return session.execute(
-            select(Product).where(Product.ean == listing.ean)
+            select(Product).where(Product.ean == listing.ean).limit(1)
         ).scalar_one_or_none()
     if listing.brand and listing.mpn:
         return session.execute(
             select(Product).where(
                 func.lower(Product.brand) == listing.brand.lower(),
                 func.lower(Product.mpn) == listing.mpn.lower(),
-            )
+            ).limit(1)
         ).scalar_one_or_none()
     return session.execute(
-        select(Product).where(func.lower(Product.title) == listing.title.lower())
+        select(Product).where(func.lower(Product.title) == listing.title.lower()).limit(1)
     ).scalar_one_or_none()
 
 
