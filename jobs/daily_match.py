@@ -13,6 +13,11 @@ Usage
     python -m jobs.daily_match --llm --min-confidence 0.80
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 import argparse
 import logging
 from decimal import Decimal

@@ -1,5 +1,10 @@
 """Daily catalogue ingestion entrypoint."""
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 from pathlib import Path
 
 from agnaradie_pricing.catalogue.ingest import ingest_catalogue_csv
