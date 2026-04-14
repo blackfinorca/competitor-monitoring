@@ -7,6 +7,9 @@ Strategy per competitor (from live inspection):
   - ahprofi_sk        → search-by-MPN fallback (custom HTML parser)
   - naradieshop_sk    → search-by-MPN fallback (ThirtyBees HTML parser)
   - toolzone_sk       → sitemap-based full-catalogue scrape (JSON-LD per page)
+  - rebiop_sk         → search-by-MPN fallback (custom HTML parser; /search/products?q=)
+  - strend_sk         → discover_feed first; search-by-MPN fallback (WooCommerce HTML)
+  - boukal_cz         → discover_feed first (Heureka/Zboží XML); JS-rendered fallback
   - ferant_sk         → skipped (DNS fails as of 2026-04)
 """
 
@@ -16,10 +19,13 @@ from pathlib import Path
 from agnaradie_pricing.catalogue.ingest import load_catalogue_csv
 from agnaradie_pricing.db.session import make_session_factory
 from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
+from agnaradie_pricing.scrapers.boukal import BoukalScraper
 from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
 from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
 from agnaradie_pricing.scrapers.persistence import save_competitor_listings
+from agnaradie_pricing.scrapers.rebiop import RebiopScraper
 from agnaradie_pricing.scrapers.shoptet_generic import ShoptetGenericScraper
+from agnaradie_pricing.scrapers.strend import StrendScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors
 
@@ -38,6 +44,9 @@ SEARCH_COMPETITORS = {
     "ahprofi_sk": AhProfiScraper,
     "naradieshop_sk": NaradieShopScraper,
     "toolzone_sk": ToolZoneScraper,
+    "rebiop_sk": RebiopScraper,
+    "strend_sk": StrendScraper,
+    "boukal_cz": BoukalScraper,
 }
 
 

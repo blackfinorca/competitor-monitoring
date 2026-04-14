@@ -81,9 +81,9 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
             resp.raise_for_status()
         except Exception:
             return None
-        # Look for /produkt/ or product detail links in raw HTML
+        # Look for product detail links in raw HTML (URLs ending in -produkt)
         urls = re.findall(
-            r'href=["\']?(https://www\.boukal\.cz/[^"\'<\s]+(?:-produkt|_\w+))',
+            r'href=["\']?(https://www\.boukal\.cz/[^"\'<\s]+-produkt)',
             resp.text,
         )
         if not urls:
