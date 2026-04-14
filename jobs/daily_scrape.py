@@ -58,7 +58,10 @@ def build_scraper(config: dict):
     return ShoptetGenericScraper(config)
 
 
-def main(catalogue_path: Path = Path("data/ag_catalogue.csv")) -> dict[str, int]:
+def main(
+    catalogue_path: Path = Path("data/ag_catalogue.csv"),
+    only: list[str] | None = None,
+) -> dict[str, int]:
     settings = Settings()
     competitors = load_competitors()
     catalogue = [
@@ -71,6 +74,8 @@ def main(catalogue_path: Path = Path("data/ag_catalogue.csv")) -> dict[str, int]
 
     for comp_config in competitors:
         cid = comp_config["id"]
+        if only and cid not in only:
+            continue
         if cid not in FEED_COMPETITORS and cid not in SEARCH_COMPETITORS:
             logger.info("Skipping %s — scraper not yet implemented", cid)
             counts[cid] = 0
@@ -96,7 +101,25 @@ def main(catalogue_path: Path = Path("data/ag_catalogue.csv")) -> dict[str, int]
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run daily competitor scraping.")
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        metavar="COMPETITOR_ID",
+        help="Scrape only these competitor IDs (e.g. --only strend_sk boukal_cz)",
+    )
+    parser.add_argument(
+        "--catalogue",
+        type=Path,
+        default=Path("data/ag_catalogue.csv"),
+        metavar="PATH",
+        help="Path to AG catalogue CSV (default: data/ag_catalogue.csv)",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    result = main()
+    result = main(catalogue_path=args.catalogue, only=args.only)
     for cid, n in result.items():
         print(f"  {cid}: {n} listings")
