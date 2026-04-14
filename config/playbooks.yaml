@@ -1,0 +1,11 @@
+raise:
+  min_gap_below_next: 0.08
+  min_margin_after: 0.15
+hold:
+  max_gap_to_median: 0.05
+drop:
+  min_gap_above_median: 0.15
+  min_competitors: 2
+investigate:
+  min_day_on_day_move: 0.20
+

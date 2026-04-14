@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agnaradie-pricing"
+version = "0.1.0"
+description = "Competitor price monitoring PoC for AG Naradie."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.13",
+    "anthropic>=0.49",
+    "httpx>=0.27",
+    "lxml>=5.2",
+    "pgvector>=0.3",
+    "psycopg[binary]>=3.2",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6.0",
+    "selectolax>=0.3",
+    "sentence-transformers>=3.0",
+    "sqlalchemy>=2.0",
+    "streamlit>=1.37",
+    "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "respx>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+

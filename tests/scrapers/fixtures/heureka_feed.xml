@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<SHOP>
+  <SHOPITEM>
+    <ITEM_ID>DK-123</ITEM_ID>
+    <PRODUCTNAME>Knipex Cobra 87 01 250</PRODUCTNAME>
+    <MANUFACTURER>Knipex GmbH</MANUFACTURER>
+    <PRODUCTNO>87-01-250</PRODUCTNO>
+    <EAN>4003773012024</EAN>
+    <PRICE_VAT>24.90</PRICE_VAT>
+    <URL>https://www.doktorkladivo.sk/knipex-cobra</URL>
+    <DELIVERY_DATE>0</DELIVERY_DATE>
+  </SHOPITEM>
+</SHOP>
+

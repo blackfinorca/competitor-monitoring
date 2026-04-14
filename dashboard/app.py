@@ -1,0 +1,870 @@
+"""Streamlit dashboard for AG Naradie / ToolZone Pricing.
+
+Pages
+-----
+  1. Product Search     — Search bar → live fetch / cache → ToolZone card + competitors
+  2. Recommendations    — Product vs competitor price overview (tile view)
+  3. Coverage Health    — Scrape freshness and match rates
+
+Run with:
+    python -m streamlit run dashboard/app.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+_SRC = Path(__file__).parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+# Load .env before any Settings/LLM client is constructed so that env vars
+# are available to os.environ.get() throughout the dashboard.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=False)
+except ModuleNotFoundError:
+    pass
+
+from datetime import date, timedelta
+from decimal import Decimal
+
+import pandas as pd
+import streamlit as st
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
+
+from agnaradie_pricing.db.models import (
+    CompetitorListing,
+    PricingSnapshot,
+    Product,
+    ProductMatch,
+    Recommendation,
+)
+from agnaradie_pricing.db.session import make_session_factory
+from agnaradie_pricing.orchestrator import SearchResult, search_product
+from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
+from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
+from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
+from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
+from agnaradie_pricing.settings import Settings, load_competitors, own_store_ids
+
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="ToolZone Pricing",
+    page_icon=":wrench:",
+    layout="wide",
+)
+
+# ---------------------------------------------------------------------------
+# Cached singletons
+# ---------------------------------------------------------------------------
+
+def _get_settings() -> Settings:
+    # Not cached — Settings is lightweight and caching it causes stale-attribute
+    # errors after hot-reloads because st.cache_resource persists across re-runs.
+    return Settings()
+
+@st.cache_resource
+def _get_factory():
+    return make_session_factory(_get_settings())
+
+def _session() -> Session:
+    return _get_factory()()
+
+@st.cache_resource
+def _competitor_names() -> dict[str, str]:
+    try:
+        return {c["id"]: c["name"] for c in load_competitors()}
+    except Exception:
+        return {}
+
+def _display_name(cid: str) -> str:
+    return _competitor_names().get(cid, cid)
+
+@st.cache_resource
+def _get_toolzone_scraper():
+    cfg = next(
+        (c for c in load_competitors() if c["id"] == "toolzone_sk"),
+        {"id": "toolzone_sk", "url": "https://www.toolzone.sk", "weight": 1.0, "rate_limit_rps": 1},
+    )
+    return ToolZoneScraper(cfg)
+
+@st.cache_resource
+def _get_competitor_scrapers() -> dict:
+    configs = {c["id"]: c for c in load_competitors() if not c.get("own_store")}
+    registry = {
+        "ahprofi_sk": AhProfiScraper,
+        "naradieshop_sk": NaradieShopScraper,
+        "doktorkladivo_sk": DoktorKladivoScraper,
+    }
+    scrapers = {}
+    for cid, cls in registry.items():
+        if cid in configs:
+            scrapers[cid] = cls(configs[cid])
+    return scrapers
+
+@st.cache_resource
+def _get_llm_client():
+    # Read directly from env so this works even if the Settings cache is stale
+    # (st.cache_resource persists across hot-reloads within the same process).
+    api_key = os.environ.get("QWEN_API_KEY")
+    if not api_key:
+        # Fall back to Settings object if env var wasn't set at process start
+        try:
+            s = _get_settings()
+            api_key = getattr(s, "qwen_api_key", None)
+        except Exception:
+            pass
+    if not api_key:
+        return None
+    model = os.environ.get("QWEN_MODEL", "qwen3-235b-a22b")
+    try:
+        s = _get_settings()
+        model = getattr(s, "qwen_model", model) or model
+    except Exception:
+        pass
+    from agnaradie_pricing.matching.llm_matcher import QwenClient
+    return QwenClient(api_key=api_key, model=model)
+
+# ---------------------------------------------------------------------------
+# Navigation — top tab bar
+# ---------------------------------------------------------------------------
+
+_llm_status = "disabled (no QWEN_API_KEY)"
+try:
+    _llm = _get_llm_client()
+    if _llm:
+        _llm_status = str(_llm)
+except Exception:
+    pass
+st.caption(f"ToolZone Pricing  ·  Today: {date.today().isoformat()}  ·  LLM: {_llm_status}")
+
+tab1, tab2, tab3 = st.tabs(["🔍 Product Search", "💰 Price compare", "🩺 Coverage Health"])
+
+
+# ===========================================================================
+# Page 1 — Product Search
+# ===========================================================================
+
+def _render_search_tab() -> None:
+    st.header("Product Search")
+    st.caption(
+        "Enter an EAN, MPN, or product name. "
+        "Cached results (< 24 h) load instantly; everything else is fetched live."
+    )
+
+    # --- Search form ---------------------------------------------------------
+    with st.form("search_form", clear_on_submit=False):
+        col_input, col_btn, col_refresh = st.columns([5, 1, 1])
+        with col_input:
+            query = st.text_input(
+                "Query",
+                placeholder="e.g. 87-01-250  or  knipex cobra 250  or  4003773011965",
+                label_visibility="collapsed",
+                value=st.session_state.get("last_query", ""),
+            )
+        with col_btn:
+            submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
+        with col_refresh:
+            refresh = st.form_submit_button(
+                "Refresh",
+                use_container_width=True,
+                help="Re-fetch live data even if the cache is fresh",
+            )
+
+    # --- Run search ----------------------------------------------------------
+    run_query = query.strip()
+
+    should_search = (submitted or refresh) and run_query
+    force_refresh = bool(refresh)
+
+    if should_search:
+        st.session_state["last_query"] = run_query
+
+        progress_messages: list[str] = []
+
+        with st.status("Searching…", expanded=True) as status_box:
+            def _on_progress(msg: str) -> None:
+                st.write(msg)
+                progress_messages.append(msg)
+
+            try:
+                with _session() as session:
+                    result: SearchResult = search_product(
+                        run_query,
+                        session,
+                        competitor_scrapers=_get_competitor_scrapers(),
+                        toolzone_scraper=_get_toolzone_scraper(),
+                        llm_client=_get_llm_client(),
+                        force_refresh=force_refresh,
+                        on_progress=_on_progress,
+                    )
+                st.session_state["search_result"] = result
+                label = "From cache" if result.from_cache else "Done"
+                status_box.update(label=label, state="complete", expanded=False)
+            except Exception as exc:
+                status_box.update(label=f"Error: {exc}", state="error")
+                st.exception(exc)
+                return
+
+    # --- Display results -----------------------------------------------------
+    if "search_result" not in st.session_state:
+        st.info("Enter a search term above to find a product.")
+        return
+
+    result: SearchResult = st.session_state["search_result"]
+
+    if result.product is None:
+        st.warning(f"No product found for **{result.query}**. Try a different EAN, MPN, or name.")
+        return
+
+    # Show errors (non-fatal)
+    if result.errors:
+        with st.expander(f"⚠ {len(result.errors)} search warning(s)", expanded=False):
+            for cid, msg in result.errors.items():
+                st.caption(f"**{_display_name(cid)}**: {msg}")
+
+    # Cache badge
+    if result.from_cache:
+        st.caption("Showing cached results  —  press **Refresh** to re-fetch live data.")
+
+    product = result.product
+    tz_row = result.tz_listing
+
+    # Build match lookup: competitor_id → (match_type, confidence)
+    match_lookup: dict[str, tuple[str, float]] = {}
+    for pm in result.matches:
+        match_lookup[pm.competitor_id] = (pm.match_type, float(pm.confidence))
+
+    # ToolZone price
+    tz_price: float | None = None
+    if tz_row and tz_row.price_eur:
+        tz_price = float(tz_row.price_eur)
+    elif product.price_eur:
+        tz_price = float(product.price_eur)
+
+    # -----------------------------------------------------------------------
+    # Layout: left card | right competitor panel
+    # -----------------------------------------------------------------------
+    left, right = st.columns([1, 2], gap="large")
+
+    # =====================================================================
+    # LEFT — ToolZone product card
+    # =====================================================================
+    with left:
+        st.subheader("ToolZone (reference)")
+
+        if tz_row and tz_row.url:
+            st.markdown(f"#### [{product.title}]({tz_row.url})")
+        else:
+            st.markdown(f"#### {product.title}")
+
+        st.divider()
+
+        price_col, stock_col = st.columns(2)
+        with price_col:
+            st.metric("Price", f"€ {tz_price:.2f}" if tz_price else "—")
+        with stock_col:
+            if tz_row and tz_row.in_stock is not None:
+                st.metric("Stock", "✅ In stock" if tz_row.in_stock else "❌ Out of stock")
+            else:
+                st.metric("Stock", "—")
+
+        st.divider()
+
+        def _field(label: str, value) -> None:
+            if value:
+                st.markdown(f"**{label}** `{value}`")
+
+        _field("Brand",    product.brand)
+        _field("MPN",      product.mpn or (tz_row.mpn if tz_row else None))
+        _field("EAN",      product.ean or (tz_row.ean if tz_row else None))
+        _field("SKU",      product.sku)
+        _field("Category", product.category)
+
+        if tz_row and tz_row.scraped_at:
+            ts = pd.Timestamp(tz_row.scraped_at).tz_localize(None)
+            delta = pd.Timestamp.utcnow().tz_localize(None) - ts
+            hours = int(delta.total_seconds() / 3600)
+            if hours < 26:
+                freshness = f"🟢 {hours}h ago"
+            elif hours < 50:
+                freshness = f"🟡 {hours}h ago"
+            else:
+                freshness = f"🔴 {hours // 24}d ago"
+            st.caption(f"Scraped {freshness}")
+
+        # Market position from latest snapshot
+        with _session() as session:
+            snapshot = session.execute(
+                select(PricingSnapshot)
+                .where(PricingSnapshot.ag_product_id == product.id)
+                .order_by(PricingSnapshot.snapshot_date.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+        if snapshot:
+            st.divider()
+            st.caption("**Market position (latest snapshot)**")
+            rank_col, cnt_col = st.columns(2)
+            rank_col.metric(
+                "Rank",
+                f"#{snapshot.ag_rank} / {(snapshot.competitor_count or 0) + 1}"
+                if snapshot.ag_rank else "—",
+            )
+            cnt_col.metric("Competitors", snapshot.competitor_count or 0)
+            if snapshot.median_price and tz_price:
+                diff_vs_median = (tz_price - float(snapshot.median_price)) / float(snapshot.median_price) * 100
+                st.metric(
+                    "vs Market Median",
+                    f"€ {float(snapshot.median_price):.2f}",
+                    delta=f"{diff_vs_median:+.1f}%",
+                    delta_color="inverse" if diff_vs_median > 0 else "normal",
+                )
+
+    # =====================================================================
+    # RIGHT — Competitor panel
+    # =====================================================================
+    with right:
+        comp_listings = result.competitor_hits
+
+        if not comp_listings:
+            st.subheader("Competitor Prices")
+            st.info(
+                "No competitor matches found. "
+                "Try pressing **Refresh** to run a fresh live search."
+            )
+        else:
+            n = len(comp_listings)
+            st.subheader(f"Competitor Prices — {n} match{'es' if n != 1 else ''}")
+
+            display_rows = []
+            for cl in sorted(comp_listings, key=lambda r: float(r.price_eur)):
+                price = float(cl.price_eur)
+                diff_pct = (price - tz_price) / tz_price * 100 if tz_price else None
+
+                if diff_pct is None:
+                    diff_str = "—"
+                elif diff_pct > 0.5:
+                    diff_str = f"▲ +{diff_pct:.1f}%"
+                elif diff_pct < -0.5:
+                    diff_str = f"▼ {diff_pct:.1f}%"
+                else:
+                    diff_str = f"≈ {diff_pct:+.1f}%"
+
+                mt, conf = match_lookup.get(cl.competitor_id, ("—", 0.0))
+                badge_map = {
+                    "exact_ean":          "EAN ✓",
+                    "exact_mpn":          "MPN ✓",
+                    "regex_ean_title":    "EAN ~",
+                    "regex_mpn_title":    "MPN ~",
+                    "regex_mpn_no_brand": "Title ?",
+                    "llm_fuzzy":          "LLM ~",
+                }
+                match_label = badge_map.get(mt, mt)
+
+                ts = pd.Timestamp(cl.scraped_at).tz_localize(None)
+                h = int((pd.Timestamp.utcnow().tz_localize(None) - ts).total_seconds() / 3600)
+                freshness = f"{h}h ago" if h < 48 else f"{h // 24}d ago"
+
+                display_rows.append({
+                    "Store":       _display_name(cl.competitor_id),
+                    "Price":       f"€ {price:.2f}",
+                    "vs ToolZone": diff_str,
+                    "Match":       match_label,
+                    "Confidence":  f"{conf:.0%}" if conf else "—",
+                    "Scraped":     freshness,
+                    "URL":         cl.url or "",
+                })
+
+            disp_df = pd.DataFrame(display_rows)
+            st.dataframe(
+                disp_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "URL": st.column_config.LinkColumn("Link", display_text="Open ↗"),
+                },
+            )
+
+        # Price history chart
+        with _session() as session:
+            history_rows = session.execute(
+                select(
+                    PricingSnapshot.snapshot_date,
+                    PricingSnapshot.ag_price,
+                    PricingSnapshot.min_price,
+                    PricingSnapshot.median_price,
+                    PricingSnapshot.max_price,
+                )
+                .where(
+                    PricingSnapshot.ag_product_id == product.id,
+                    PricingSnapshot.snapshot_date >= date.today() - timedelta(days=30),
+                )
+                .order_by(PricingSnapshot.snapshot_date)
+            ).fetchall()
+
+        if history_rows:
+            st.divider()
+            st.subheader("30-day price trend")
+            hist_df = pd.DataFrame(
+                history_rows,
+                columns=["date", "ag_price", "min_price", "median_price", "max_price"],
+            )
+            hist_df["date"] = pd.to_datetime(hist_df["date"])
+            for col in ["ag_price", "min_price", "median_price", "max_price"]:
+                hist_df[col] = hist_df[col].astype(float)
+            chart_df = hist_df.set_index("date")[["ag_price", "min_price", "median_price", "max_price"]]
+            chart_df.columns = ["ToolZone", "Market Min", "Market Median", "Market Max"]
+            st.line_chart(chart_df)
+
+
+# ===========================================================================
+# Page 2 — Price compare (tile view)
+# ===========================================================================
+
+PLAYBOOK_BADGE = {
+    "raise":       "🟢 RAISE",
+    "drop":        "🔴 DROP",
+    "hold":        "🔵 HOLD",
+    "investigate": "🟠 INVESTIGATE",
+}
+
+
+@st.cache_data(ttl=300, show_spinner="Loading price data…")
+def _load_price_compare_data() -> dict:
+    """Fetch all Price Compare data in one session. Cached for 5 minutes.
+
+    Returns plain dicts/lists (no ORM objects) so Streamlit can serialise them.
+    """
+    def _f(v) -> float | None:
+        return float(v) if v is not None else None
+
+    with _session() as session:
+        # 1. Matched product IDs (high-confidence matches only)
+        matched_ids: list[int] = list(session.scalars(
+            select(ProductMatch.ag_product_id)
+            .where(
+                ProductMatch.ag_product_id.isnot(None),
+                ProductMatch.confidence >= Decimal("0.85"),
+            )
+            .distinct()
+        ).all())
+
+        if not matched_ids:
+            return {"matched_ids": [], "products": {}, "snapshots": {}, "recommendations": {}, "comp_map": {}}
+
+        # 2. Products
+        products = {
+            p.id: {
+                "sku": p.sku,
+                "title": p.title,
+                "brand": p.brand,
+                "price_eur": _f(p.price_eur),
+            }
+            for p in session.scalars(
+                select(Product).where(Product.id.in_(matched_ids))
+            ).all()
+        }
+
+        # 3. Latest pricing snapshot per product
+        latest_snap_sub = (
+            select(
+                PricingSnapshot.ag_product_id,
+                func.max(PricingSnapshot.snapshot_date).label("max_date"),
+            )
+            .where(PricingSnapshot.ag_product_id.in_(matched_ids))
+            .group_by(PricingSnapshot.ag_product_id)
+            .subquery()
+        )
+        snapshots = {
+            row.ag_product_id: {
+                "min_price":        _f(row.min_price),
+                "max_price":        _f(row.max_price),
+                "median_price":     _f(row.median_price),
+                "ag_rank":          row.ag_rank,
+                "competitor_count": row.competitor_count,
+            }
+            for row in session.execute(
+                select(
+                    PricingSnapshot.ag_product_id,
+                    PricingSnapshot.min_price,
+                    PricingSnapshot.max_price,
+                    PricingSnapshot.median_price,
+                    PricingSnapshot.ag_rank,
+                    PricingSnapshot.competitor_count,
+                ).join(
+                    latest_snap_sub,
+                    (PricingSnapshot.ag_product_id == latest_snap_sub.c.ag_product_id)
+                    & (PricingSnapshot.snapshot_date == latest_snap_sub.c.max_date),
+                )
+            ).fetchall()
+        }
+
+        # 4. Latest recommendation per product (any status, most recent date)
+        latest_rec_sub = (
+            select(
+                Recommendation.ag_product_id,
+                func.max(Recommendation.snapshot_date).label("max_date"),
+            )
+            .where(Recommendation.ag_product_id.in_(matched_ids))
+            .group_by(Recommendation.ag_product_id)
+            .subquery()
+        )
+        recommendations = {
+            row.ag_product_id: {
+                "playbook":        row.playbook,
+                "suggested_price": _f(row.suggested_price),
+                "rationale":       row.rationale,
+            }
+            for row in session.execute(
+                select(
+                    Recommendation.ag_product_id,
+                    Recommendation.playbook,
+                    Recommendation.suggested_price,
+                    Recommendation.rationale,
+                ).join(
+                    latest_rec_sub,
+                    (Recommendation.ag_product_id == latest_rec_sub.c.ag_product_id)
+                    & (Recommendation.snapshot_date == latest_rec_sub.c.max_date),
+                )
+            ).fetchall()
+        }
+
+        # 5. Latest competitor listing — only for the (competitor_id, competitor_sku)
+        #    pairs that appear in our matched products. This avoids a full-table scan.
+        relevant_pairs_sub = (
+            select(ProductMatch.competitor_id, ProductMatch.competitor_sku)
+            .where(
+                ProductMatch.ag_product_id.in_(matched_ids),
+                ProductMatch.confidence >= Decimal("0.85"),
+                ProductMatch.competitor_sku.isnot(None),
+            )
+            .distinct()
+            .subquery()
+        )
+        latest_listing_sub = (
+            select(
+                CompetitorListing.competitor_id,
+                CompetitorListing.competitor_sku,
+                func.max(CompetitorListing.scraped_at).label("max_scraped"),
+            )
+            .join(
+                relevant_pairs_sub,
+                (CompetitorListing.competitor_id == relevant_pairs_sub.c.competitor_id)
+                & (CompetitorListing.competitor_sku == relevant_pairs_sub.c.competitor_sku),
+            )
+            .group_by(CompetitorListing.competitor_id, CompetitorListing.competitor_sku)
+            .subquery()
+        )
+        comp_rows = session.execute(
+            select(
+                ProductMatch.ag_product_id,
+                ProductMatch.competitor_id,
+                CompetitorListing.price_eur,
+                CompetitorListing.url,
+                CompetitorListing.in_stock,
+                CompetitorListing.scraped_at,
+            )
+            .join(
+                latest_listing_sub,
+                (latest_listing_sub.c.competitor_id == ProductMatch.competitor_id)
+                & (latest_listing_sub.c.competitor_sku == ProductMatch.competitor_sku),
+            )
+            .join(
+                CompetitorListing,
+                (CompetitorListing.competitor_id == latest_listing_sub.c.competitor_id)
+                & (CompetitorListing.competitor_sku == latest_listing_sub.c.competitor_sku)
+                & (CompetitorListing.scraped_at == latest_listing_sub.c.max_scraped),
+            )
+            .where(
+                ProductMatch.ag_product_id.in_(matched_ids),
+                ProductMatch.confidence >= Decimal("0.85"),
+            )
+        ).fetchall()
+
+    comp_map: dict[int, list] = {}
+    for row in comp_rows:
+        comp_map.setdefault(row.ag_product_id, []).append({
+            "competitor_id": row.competitor_id,
+            "price_eur":     float(row.price_eur),
+            "url":           row.url or "",
+            "in_stock":      row.in_stock,
+            "scraped_at":    row.scraped_at,
+        })
+
+    return {
+        "matched_ids":     matched_ids,
+        "products":        products,
+        "snapshots":       snapshots,
+        "recommendations": recommendations,
+        "comp_map":        comp_map,
+    }
+
+
+def _render_price_compare_tab() -> None:
+    st.header("Price Compare")
+
+    data = _load_price_compare_data()
+    matched_ids    = data["matched_ids"]
+    products       = data["products"]
+    snapshots      = data["snapshots"]
+    recommendations = data["recommendations"]
+    comp_map       = data["comp_map"]
+
+    if not matched_ids:
+        st.info("No matched products yet. Run a product search to start matching products to competitors.")
+        return
+
+    # KPI row
+    total_matches = sum(len(v) for v in comp_map.values())
+    k1, k2, _, per_page_col, refresh_col = st.columns([1, 1, 2, 1, 1])
+    k1.metric("Matched products", len(matched_ids))
+    k2.metric("Total competitor prices", total_matches)
+    per_page = per_page_col.selectbox("Per page", [10, 20, 50], index=0, label_visibility="visible")
+    if refresh_col.button("↺ Refresh", use_container_width=True, help="Reload data from the database"):
+        _load_price_compare_data.clear()
+        st.rerun()
+    st.divider()
+
+    # Sort tiles: most competitor matches first
+    sorted_ids = sorted(matched_ids, key=lambda pid: len(comp_map.get(pid, [])), reverse=True)
+
+    # ---- Pagination ---------------------------------------------------------
+    total_pages = max(1, -(-len(sorted_ids) // per_page))  # ceiling division
+    if "pc_page" not in st.session_state:
+        st.session_state["pc_page"] = 1
+    if st.session_state.get("pc_per_page") != per_page:
+        st.session_state["pc_page"] = 1
+        st.session_state["pc_per_page"] = per_page
+
+    page_num = st.session_state["pc_page"]
+    start = (page_num - 1) * per_page
+    page_ids = sorted_ids[start : start + per_page]
+
+    # ---- Render tiles -------------------------------------------------------
+    for pid in page_ids:
+        product = products.get(pid)
+        if not product:
+            continue
+
+        competitors = comp_map.get(pid, [])
+        snap = snapshots.get(pid)
+        rec  = recommendations.get(pid)
+        tz_price = product["price_eur"]
+
+        with st.container(border=True):
+            left, right = st.columns([1, 3], gap="large")
+
+            # --- Left: ToolZone reference ------------------------------------
+            with left:
+                st.markdown(f"**{product['sku'] or '—'}**")
+                if product["brand"]:
+                    st.caption(product["brand"])
+                st.markdown(str(product["title"] or "")[:80])
+                st.metric(
+                    "ToolZone price",
+                    f"€ {tz_price:.2f}" if tz_price else "—",
+                )
+                n_comp = len(competitors)
+                st.caption(f"{n_comp} competitor match{'es' if n_comp != 1 else ''}")
+                if snap and snap["ag_rank"] and snap["competitor_count"]:
+                    st.caption(f"Rank #{snap['ag_rank']} of {snap['competitor_count'] + 1}")
+
+            # --- Right: competitor prices ------------------------------------
+            with right:
+                if not competitors:
+                    st.info("No competitor listings available.")
+                else:
+                    comp_display = []
+                    for c in sorted(competitors, key=lambda r: r["price_eur"]):
+                        price = c["price_eur"]
+                        diff_pct = (price - tz_price) / tz_price * 100 if tz_price else None
+
+                        if diff_pct is None:
+                            diff_str = "—"
+                        elif diff_pct > 0.5:
+                            diff_str = f"▲ +{diff_pct:.1f}%"
+                        elif diff_pct < -0.5:
+                            diff_str = f"▼ {diff_pct:.1f}%"
+                        else:
+                            diff_str = f"≈ {diff_pct:+.1f}%"
+
+                        ts = pd.Timestamp(c["scraped_at"]).tz_localize(None)
+                        h = int((pd.Timestamp.utcnow().tz_localize(None) - ts).total_seconds() / 3600)
+                        freshness = f"{h}h ago" if h < 48 else f"{h // 24}d ago"
+                        stock = "✅" if c["in_stock"] else ("❌" if c["in_stock"] is False else "—")
+
+                        comp_display.append({
+                            "Store":       _display_name(c["competitor_id"]),
+                            "Price":       f"€ {price:.2f}",
+                            "vs ToolZone": diff_str,
+                            "In Stock":    stock,
+                            "Scraped":     freshness,
+                            "URL":         c["url"],
+                        })
+
+                    st.dataframe(
+                        pd.DataFrame(comp_display),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "URL": st.column_config.LinkColumn("Link", display_text="Open ↗"),
+                        },
+                    )
+
+            # --- Bottom: stats + recommendation badge ------------------------
+            st.divider()
+            stat_cols = st.columns(5)
+            stat_cols[0].metric("Min price",  f"€ {snap['min_price']:.2f}"  if snap and snap["min_price"]  else "—")
+            stat_cols[1].metric("Max price",  f"€ {snap['max_price']:.2f}"  if snap and snap["max_price"]  else "—")
+            stat_cols[2].metric("Median",     f"€ {snap['median_price']:.2f}" if snap and snap["median_price"] else "—")
+            stat_cols[3].metric("Suggested",  f"€ {rec['suggested_price']:.2f}" if rec and rec["suggested_price"] else "—")
+            with stat_cols[4]:
+                if rec:
+                    badge = PLAYBOOK_BADGE.get(rec["playbook"], rec["playbook"].upper())
+                    st.markdown(f"**{badge}**")
+                    if rec["rationale"]:
+                        st.caption(rec["rationale"])
+
+    # ---- Pagination controls ------------------------------------------------
+    st.divider()
+    nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
+    with nav_left:
+        if st.button("← Previous", disabled=(page_num <= 1), use_container_width=True):
+            st.session_state["pc_page"] = page_num - 1
+            st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<div style='text-align:center; padding-top:6px;'>Page {page_num} of {total_pages}"
+            f"  —  showing {start + 1}–{min(start + per_page, len(sorted_ids))} of {len(sorted_ids)}</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_right:
+        if st.button("Next →", disabled=(page_num >= total_pages), use_container_width=True):
+            st.session_state["pc_page"] = page_num + 1
+            st.rerun()
+
+
+# ===========================================================================
+# Page 3 — Coverage Health
+# ===========================================================================
+
+def _render_coverage_tab() -> None:
+    st.header("Coverage Health")
+
+    with _session() as session:
+        week_ago = date.today() - timedelta(days=7)
+
+        listing_counts = session.execute(
+            select(
+                CompetitorListing.competitor_id,
+                func.count(CompetitorListing.id).label("listings"),
+                func.max(CompetitorListing.scraped_at).label("last_scraped"),
+            )
+            .where(CompetitorListing.scraped_at >= pd.Timestamp(week_ago))
+            .group_by(CompetitorListing.competitor_id)
+        ).fetchall()
+
+        match_counts = session.execute(
+            select(
+                ProductMatch.competitor_id,
+                func.count(ProductMatch.id).label("matches"),
+            )
+            .where(ProductMatch.confidence >= Decimal("0.72"))
+            .group_by(ProductMatch.competitor_id)
+        ).fetchall()
+
+        total_products = session.scalar(select(func.count(Product.id))) or 0
+
+    if not listing_counts:
+        st.info("No competitor listings in the last 7 days. Run a search or use the CLI scraper.")
+        return
+
+    own_stores = own_store_ids()
+    counts_df = pd.DataFrame(listing_counts, columns=["competitor_id", "listings", "last_scraped"])
+    match_df = pd.DataFrame(match_counts, columns=["competitor_id", "matches"])
+
+    all_df = counts_df.merge(match_df, on="competitor_id", how="left")
+    all_df["matches"] = all_df["matches"].fillna(0).astype(int)
+    all_df["match_rate"] = (
+        (all_df["matches"] / total_products * 100).round(1) if total_products else 0.0
+    )
+    all_df = all_df.sort_values("listings", ascending=False)
+
+    competitor_df = all_df[~all_df["competitor_id"].isin(own_stores)]
+    own_df = all_df[all_df["competitor_id"].isin(own_stores)]
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total products", total_products)
+    k2.metric("Active competitors (7d)", len(competitor_df))
+    k3.metric("Total listings (7d)", int(competitor_df["listings"].sum()) if not competitor_df.empty else 0)
+
+    st.divider()
+
+    def _freshness_badge(ts) -> str:
+        if ts is None:
+            return "Never"
+        delta = pd.Timestamp.utcnow().tz_localize(None) - pd.Timestamp(ts).tz_localize(None)
+        hours = delta.total_seconds() / 3600
+        if hours < 26:
+            return f"🟢 {delta.components.hours}h ago"
+        if hours < 50:
+            return f"🟡 {int(hours)}h ago"
+        return f"🔴 {int(hours // 24)}d ago"
+
+    def _render_health_table(df: pd.DataFrame) -> None:
+        display = df.copy()
+        display["competitor_id"] = display["competitor_id"].apply(_display_name)
+        display["freshness"] = display["last_scraped"].apply(_freshness_badge)
+        display["match_rate"] = display["match_rate"].apply(lambda x: f"{x:.1f}%")
+        st.dataframe(
+            display[["competitor_id", "listings", "matches", "match_rate", "freshness"]].rename(
+                columns={
+                    "competitor_id": "Store",
+                    "listings": "Listings",
+                    "matches": "Matched",
+                    "match_rate": "Match Rate",
+                    "freshness": "Last Scraped",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Competitors (last 7 days)")
+    if competitor_df.empty:
+        st.info("No competitor listings found.")
+    else:
+        _render_health_table(competitor_df)
+
+    if not own_df.empty:
+        st.subheader("Own stores")
+        st.caption("Scraped as baseline — excluded from competitor benchmarks.")
+        _render_health_table(own_df)
+
+    if not competitor_df.empty:
+        st.subheader("Listings per competitor")
+        chart_data = competitor_df.copy()
+        chart_data["competitor_id"] = chart_data["competitor_id"].apply(_display_name)
+        st.bar_chart(chart_data.set_index("competitor_id")[["listings"]])
+
+
+# ===========================================================================
+# Wire up tabs
+# ===========================================================================
+
+with tab1:
+    _render_search_tab()
+
+with tab2:
+    _render_price_compare_tab()
+
+with tab3:
+    _render_coverage_tab()

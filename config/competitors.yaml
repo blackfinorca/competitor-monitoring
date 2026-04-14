@@ -1,0 +1,38 @@
+competitors:
+  - id: doktorkladivo_sk
+    name: Doktor Kladivo
+    url: https://www.doktorkladivo.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: ahprofi_sk
+    name: AH Profi
+    url: https://www.ahprofi.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: naradieshop_sk
+    name: NaradieShop
+    url: https://www.naradieshop.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: madmat_sk
+    name: Madmat
+    url: https://www.madmat.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: centrumnaradia_sk
+    name: Centrum Naradia
+    url: https://www.centrumnaradia.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: ferant_sk
+    name: Ferant
+    url: https://www.ferant.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: toolzone_sk
+    name: ToolZone
+    url: https://www.toolzone.sk
+    weight: 1.0
+    rate_limit_rps: 1
+    own_store: true  # owned by AG Naradie — exclude from competitor benchmarks
+

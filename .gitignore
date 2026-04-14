@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Virtual environment
+.venv/
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# Python build artefacts
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# Editor / tool local config
+.claude/

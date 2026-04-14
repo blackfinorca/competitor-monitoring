@@ -1,0 +1,2 @@
+"""Catalogue ingestion and normalisation."""
+
