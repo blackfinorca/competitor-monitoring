@@ -230,18 +230,18 @@ def _find_product(query: str, session: Session) -> Product | None:
 
     if kind == "ean":
         return session.execute(
-            select(Product).where(Product.ean == q)
+            select(Product).where(Product.ean == q).limit(1)
         ).scalar_one_or_none()
 
     if kind == "mpn":
         product = session.execute(
-            select(Product).where(func.lower(Product.mpn) == q.lower())
+            select(Product).where(func.lower(Product.mpn) == q.lower()).limit(1)
         ).scalar_one_or_none()
         if product is None:
             # Query looks like a SKU (e.g. "TZ-7102200") — the "TZ-" prefix is a
             # store prefix, not part of the MPN, so also try an exact SKU lookup.
             product = session.execute(
-                select(Product).where(func.lower(Product.sku) == q.lower())
+                select(Product).where(func.lower(Product.sku) == q.lower()).limit(1)
             ).scalar_one_or_none()
         return product
 
