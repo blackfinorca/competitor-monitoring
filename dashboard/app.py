@@ -537,56 +537,33 @@ def _load_price_compare_data() -> dict:
             ).fetchall()
         }
 
-        # 5. Latest competitor listing — only for the (competitor_id, competitor_sku)
-        #    pairs that appear in our matched products. This avoids a full-table scan.
-        relevant_pairs_sub = (
-            select(ProductMatch.competitor_id, ProductMatch.competitor_sku)
-            .where(
-                ProductMatch.ag_product_id.in_(matched_ids),
-                ProductMatch.confidence >= Decimal("0.85"),
-                ProductMatch.competitor_sku.isnot(None),
-            )
-            .distinct()
-            .subquery()
-        )
-        latest_listing_sub = (
-            select(
-                CompetitorListing.competitor_id,
-                CompetitorListing.competitor_sku,
-                func.max(CompetitorListing.scraped_at).label("max_scraped"),
-            )
-            .join(
-                relevant_pairs_sub,
-                (CompetitorListing.competitor_id == relevant_pairs_sub.c.competitor_id)
-                & (CompetitorListing.competitor_sku == relevant_pairs_sub.c.competitor_sku),
-            )
-            .group_by(CompetitorListing.competitor_id, CompetitorListing.competitor_sku)
-            .subquery()
-        )
+        # 5. Latest competitor listing per matched pair.
+        #    Correlated subquery on (competitor_id, competitor_sku, scraped_at) —
+        #    the new index idx_cl_cid_csku_scraped makes each MAX lookup O(log n)
+        #    instead of a full table scan.
+        ids_csv = ",".join(str(i) for i in matched_ids)  # ints from DB — safe
         comp_rows = session.execute(
-            select(
-                ProductMatch.ag_product_id,
-                ProductMatch.competitor_id,
-                CompetitorListing.price_eur,
-                CompetitorListing.url,
-                CompetitorListing.in_stock,
-                CompetitorListing.scraped_at,
-            )
-            .join(
-                latest_listing_sub,
-                (latest_listing_sub.c.competitor_id == ProductMatch.competitor_id)
-                & (latest_listing_sub.c.competitor_sku == ProductMatch.competitor_sku),
-            )
-            .join(
-                CompetitorListing,
-                (CompetitorListing.competitor_id == latest_listing_sub.c.competitor_id)
-                & (CompetitorListing.competitor_sku == latest_listing_sub.c.competitor_sku)
-                & (CompetitorListing.scraped_at == latest_listing_sub.c.max_scraped),
-            )
-            .where(
-                ProductMatch.ag_product_id.in_(matched_ids),
-                ProductMatch.confidence >= Decimal("0.85"),
-            )
+            text(f"""
+                SELECT pm.ag_product_id,
+                       pm.competitor_id,
+                       cl.price_eur,
+                       cl.url,
+                       cl.in_stock,
+                       cl.scraped_at
+                FROM   product_matches pm
+                JOIN   competitor_listings cl
+                       ON  cl.competitor_id  = pm.competitor_id
+                       AND cl.competitor_sku = pm.competitor_sku
+                WHERE  pm.ag_product_id IN ({ids_csv})
+                  AND  pm.confidence    >= 0.85
+                  AND  pm.competitor_sku IS NOT NULL
+                  AND  cl.scraped_at = (
+                           SELECT MAX(cl2.scraped_at)
+                           FROM   competitor_listings cl2
+                           WHERE  cl2.competitor_id  = pm.competitor_id
+                             AND  cl2.competitor_sku = pm.competitor_sku
+                       )
+            """)
         ).fetchall()
 
     comp_map: dict[int, list] = {}
