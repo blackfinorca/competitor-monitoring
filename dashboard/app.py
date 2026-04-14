@@ -46,8 +46,11 @@ from agnaradie_pricing.db.models import (
 from agnaradie_pricing.db.session import make_session_factory
 from agnaradie_pricing.orchestrator import SearchResult, search_product
 from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
+from agnaradie_pricing.scrapers.boukal import BoukalScraper
 from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
 from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
+from agnaradie_pricing.scrapers.rebiop import RebiopScraper
+from agnaradie_pricing.scrapers.strend import StrendScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors, own_store_ids
 
@@ -102,6 +105,9 @@ def _get_competitor_scrapers() -> dict:
         "ahprofi_sk": AhProfiScraper,
         "naradieshop_sk": NaradieShopScraper,
         "doktorkladivo_sk": DoktorKladivoScraper,
+        "rebiop_sk": RebiopScraper,
+        "strend_sk": StrendScraper,
+        "boukal_cz": BoukalScraper,
     }
     scrapers = {}
     for cid, cls in registry.items():

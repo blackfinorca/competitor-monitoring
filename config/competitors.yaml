@@ -29,6 +29,21 @@ competitors:
     url: https://www.ferant.sk
     weight: 1.0
     rate_limit_rps: 1
+  - id: rebiop_sk
+    name: Rebiop
+    url: https://www.rebiop.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: strend_sk
+    name: Strend
+    url: https://www.strend.sk
+    weight: 1.0
+    rate_limit_rps: 1
+  - id: boukal_cz
+    name: Boukal
+    url: https://www.boukal.cz
+    weight: 1.0
+    rate_limit_rps: 1
   - id: toolzone_sk
     name: ToolZone
     url: https://www.toolzone.sk

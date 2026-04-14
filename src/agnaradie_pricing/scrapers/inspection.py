@@ -11,6 +11,9 @@ HEUREKA_FEED_PATHS = (
     "/heureka-feed.xml",
     "/heureka/export.xml",
     "/feed/heureka.xml",
+    "/zbozi.xml",           # Czech Zboží.cz (identical SHOPITEM schema)
+    "/export/heureka.xml",  # common m1web/K2 export path
+    "/export/zbozi.xml",
 )
 
 
