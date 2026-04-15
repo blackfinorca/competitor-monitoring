@@ -68,6 +68,40 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
         self.http_client = http_client or make_client(timeout=15.0)
 
     # ------------------------------------------------------------------
+    def run_daily(self, ag_catalogue: list[dict]) -> list[CompetitorListing]:
+        """Override base: group by brand, load each brand page once."""
+        feed_url = self.discover_feed()
+        if feed_url:
+            return self.fetch_feed(feed_url)
+
+        # Group catalogue items by brand slug to avoid reloading the same page
+        from collections import defaultdict
+        import re as _re
+        brand_groups: dict[str, list[dict]] = defaultdict(list)
+        for item in ag_catalogue:
+            brand = item.get("brand") or ""
+            if brand:
+                brand_groups[_brand_to_slug(brand)].append(item)
+
+        results: list[CompetitorListing] = []
+        for brand_slug, items in brand_groups.items():
+            brand_url = f"{self.base_url.rstrip('/')}/{brand_slug}?layout=1"
+            page_items = _playwright_scrape_brand_page(brand_url)
+            if not page_items:
+                continue
+            for item in items:
+                mpn = item.get("mpn") or ""
+                mpn_norm = _re.sub(r"[\s\-]", "", mpn).lower()
+                for pi in page_items:
+                    code_norm = _re.sub(r"[\s\-]", "", pi.get("code", "")).lower()
+                    if mpn_norm and mpn_norm in code_norm:
+                        listing = _to_listing(pi, self.competitor_id)
+                        if listing:
+                            results.append(listing)
+                        break
+        return results
+
+    # ------------------------------------------------------------------
     def discover_feed(self) -> str | None:
         """Probe Czech Heureka + Zboží feed paths first."""
         for path in HEUREKA_FEED_PATHS:
@@ -131,45 +165,57 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
 # Playwright scraping
 # ---------------------------------------------------------------------------
 
-def _playwright_scrape_brand_page(url: str) -> list[dict]:
-    """Launch a headless browser, load the brand page, return deduplicated product dicts."""
+_EXTRACT_ALL_JS = """() => {
+    const seen = new Set();
+    const items = [];
+    document.querySelectorAll('.product_item').forEach(el => {
+        const link = el.querySelector('a[href*="produkt"]')?.href || '';
+        if (!link || seen.has(link)) return;
+        seen.add(link);
+        const codeRaw = el.querySelector('.product_item_code')?.innerText?.trim() || '';
+        const code = codeRaw.replace(/^K\\u00f3d:\\s*/i, '').trim();
+        const title = el.querySelector('.item_data_wrap a')?.innerText?.trim()
+                    || el.querySelector('.product_item_title a')?.innerText?.trim()
+                    || '';
+        const priceRaw = el.querySelector('.product_item_price_wrap')?.innerText?.trim() || '';
+        const stockRaw = el.querySelector('[class*="stock"], [class*="sklad"]')?.innerText?.trim() || '';
+        items.push({ code, title, priceRaw, link, stockRaw });
+    });
+    return items;
+}"""
+
+
+def _playwright_scrape_brand_page(url: str, max_clicks: int = 60) -> list[dict]:
+    """Load brand page and click 'Load more' until all products are visible.
+
+    Using repeated 'Načíst další' button clicks (AJAX append) is much faster
+    than navigating to separate pages — the DOM accumulates all products in
+    one session with no full page reloads between batches.
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return []
 
-    results = []
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page()
-            # domcontentloaded + explicit sleep is more reliable than networkidle
-            # for AJAX-heavy pages — networkidle can resolve before products load.
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(5)
 
-            results = page.evaluate("""() => {
-                const seen = new Set();
-                const items = [];
-                document.querySelectorAll('.product_item').forEach(el => {
-                    const link = el.querySelector('a[href*="produkt"]')?.href || '';
-                    if (!link || seen.has(link)) return;  // deduplicate dual-layout
-                    seen.add(link);
-                    const codeRaw = el.querySelector('.product_item_code')?.innerText?.trim() || '';
-                    const code = codeRaw.replace(/^K\\u00f3d:\\s*/i, '').trim();
-                    const title = el.querySelector('.item_data_wrap a')?.innerText?.trim()
-                                || el.querySelector('.product_item_title a')?.innerText?.trim()
-                                || '';
-                    const priceRaw = el.querySelector('.product_item_price_wrap')?.innerText?.trim() || '';
-                    const stockRaw = el.querySelector('[class*="stock"], [class*="sklad"]')?.innerText?.trim() || '';
-                    items.push({ code, title, priceRaw, link, stockRaw });
-                });
-                return items;
-            }""")
+            for _ in range(max_clicks):
+                btn = page.query_selector(".k2pagNextAjax")
+                if not btn:
+                    break  # all products loaded
+                btn.click()
+                time.sleep(2)  # wait for AJAX to append next batch
+
+            items = page.evaluate(_EXTRACT_ALL_JS)
             browser.close()
+            return items
     except Exception:
-        pass
-    return results
+        return []
 
 
 # ---------------------------------------------------------------------------
