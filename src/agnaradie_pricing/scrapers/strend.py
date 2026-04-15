@@ -1,12 +1,18 @@
 """Strend scraper.
 
-Strend (strend.sk) runs on WordPress + WooCommerce (Flatsome theme).
-The WooCommerce REST API is disabled; search results are available via the
-standard WordPress `?s=` search endpoint which returns static HTML.
+NOTE: strend.sk is a WordPress *content/brand site* for the "Strend Pro"
+budget tool brand. Despite having WooCommerce installed, its category
+pages (/dielna/, /stavba/, /zahradne-naradie/) are static WordPress pages
+with no product listings. Search (`?s=`) returns no products. There is no
+product catalogue to scrape.
+
+The scraper is kept as a stub so the competitor_id remains registered in
+the DB and the daily job does not crash. It will produce 0 listings until
+the site adds a proper product shop.
 
 Strategy
 --------
-1. discover_feed(): probe HEUREKA_FEED_PATHS in case a Heureka feed exists.
+1. discover_feed(): probe HEUREKA_FEED_PATHS in case a feed is added later.
    Returns None if none are found.
 
 2. search_by_query(query): GET /?s={query}, parse the first WooCommerce
