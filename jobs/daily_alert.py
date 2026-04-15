@@ -14,18 +14,17 @@ Slack payload format (Block Kit):
 Nothing is sent if ALERT_WEBHOOK_URL is not set or if there are no alerts.
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from __future__ import annotations
-
 import json
 import logging
 from datetime import date, datetime, UTC
 from decimal import Decimal
-from pathlib import Path
 
 import httpx
 from sqlalchemy import select

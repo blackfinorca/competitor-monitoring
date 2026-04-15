@@ -50,7 +50,6 @@ from agnaradie_pricing.scrapers.boukal import BoukalScraper
 from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
 from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
 from agnaradie_pricing.scrapers.rebiop import RebiopScraper
-from agnaradie_pricing.scrapers.strend import StrendScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors, own_store_ids
 
@@ -106,7 +105,6 @@ def _get_competitor_scrapers() -> dict:
         "naradieshop_sk": NaradieShopScraper,
         "doktorkladivo_sk": DoktorKladivoScraper,
         "rebiop_sk": RebiopScraper,
-        "strend_sk": StrendScraper,
         "boukal_cz": BoukalScraper,
     }
     scrapers = {}
@@ -119,30 +117,29 @@ def _get_competitor_scrapers() -> dict:
 def _get_llm_client():
     # Read directly from env so this works even if the Settings cache is stale
     # (st.cache_resource persists across hot-reloads within the same process).
-    api_key = os.environ.get("QWEN_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        # Fall back to Settings object if env var wasn't set at process start
         try:
             s = _get_settings()
-            api_key = getattr(s, "qwen_api_key", None)
+            api_key = getattr(s, "openai_api_key", None)
         except Exception:
             pass
     if not api_key:
         return None
-    model = os.environ.get("QWEN_MODEL", "qwen3-235b-a22b")
+    model = os.environ.get("OPENAI_MODEL", "o4-mini")
     try:
         s = _get_settings()
-        model = getattr(s, "qwen_model", model) or model
+        model = getattr(s, "openai_model", model) or model
     except Exception:
         pass
-    from agnaradie_pricing.matching.llm_matcher import QwenClient
-    return QwenClient(api_key=api_key, model=model)
+    from agnaradie_pricing.matching.llm_matcher import OpenAIClient
+    return OpenAIClient(api_key=api_key, model=model)
 
 # ---------------------------------------------------------------------------
 # Navigation — top tab bar
 # ---------------------------------------------------------------------------
 
-_llm_status = "disabled (no QWEN_API_KEY)"
+_llm_status = "disabled (no OPENAI_API_KEY)"
 try:
     _llm = _get_llm_client()
     if _llm:
@@ -368,9 +365,10 @@ def _render_search_tab() -> None:
                 badge_map = {
                     "exact_ean":          "EAN ✓",
                     "exact_mpn":          "MPN ✓",
+                    "mpn_no_brand":       "MPN ~",
                     "regex_ean_title":    "EAN ~",
                     "regex_mpn_title":    "MPN ~",
-                    "regex_mpn_no_brand": "Title ?",
+                    "regex_mpn_no_brand": "MPN ~",
                     "llm_fuzzy":          "LLM ~",
                 }
                 match_label = badge_map.get(mt, mt)
@@ -837,6 +835,57 @@ def _render_coverage_tab() -> None:
         chart_data = competitor_df.copy()
         chart_data["competitor_id"] = chart_data["competitor_id"].apply(_display_name)
         st.bar_chart(chart_data.set_index("competitor_id")[["listings"]])
+
+    # ---------------------------------------------------------------------------
+    # Matching pipeline reference
+    # ---------------------------------------------------------------------------
+    st.divider()
+    with st.expander("How matching works", expanded=False):
+        st.markdown("""
+Each competitor listing is matched to an AG catalogue product by running layers in
+order — the first layer that fires wins. Higher confidence = stronger evidence.
+
+| Layer | Match type | What fires it | Confidence |
+|-------|-----------|---------------|-----------|
+| 1 | `exact_ean` | EAN barcode identical on both sides | **1.00** |
+| 2 | `exact_mpn` | Brand + MPN both match (normalised) | **1.00** |
+| 3 | `mpn_no_brand` | MPN matches; listing has no brand field | **0.90** |
+| 4 | `regex_ean_title` | EAN-13 extracted from listing title matches | **0.93** |
+| 5 | `regex_mpn_title` | MPN extracted from title + brand agrees | **0.90** |
+| 6 | `regex_mpn_no_brand` | MPN extracted from title; brand absent or mismatched | **0.72–0.78** |
+| 7 *(opt-in)* | `llm_fuzzy` | o4-mini title/spec similarity after pre-filter | **0.75–0.84** |
+
+**LLM pre-filter** (layer 7): before calling the API, candidates are narrowed to
+≤ 5 products that share the same brand (or have no brand) **and** have ≥ 2 meaningful
+title words in common. This avoids wasting API quota on clearly unrelated products.
+
+**Normalisation**: MPN comparison strips spaces, dashes, and lowercases both sides
+(e.g. `87-01-250` = `8701250`). Brand comparison collapses accents and common
+abbreviations (e.g. `knipex` = `KNIPEX`).
+
+**Confidence thresholds used elsewhere**:
+- Price Compare and recommendations: `≥ 0.85` (layers 1–5 high-confidence only)
+- Coverage Health match rate: `≥ 0.72` (all deterministic layers)
+- LLM layer default accept: `≥ 0.75` (overridable with `--min-confidence`)
+""")
+
+    # Coverage notes
+    with st.expander("Competitor notes", expanded=False):
+        st.markdown("""
+| Competitor | Scrape method | Notes |
+|---|---|---|
+| Madmat | Heureka XML feed | Full catalogue via `/heureka.xml` |
+| Centrum Naradia | Heureka XML feed | Full catalogue via `/heureka.xml` |
+| ToolZone | Sitemap crawl | Own store — used as AG reference price |
+| Boukal (CZ) | HTTP brand-page pagination | Opens every product page; EAN + Katalog from spec table |
+| AH Profi | Search-by-MPN | Custom HTML parser |
+| NaradieShop | Search-by-MPN | ThirtyBees HTML parser |
+| Doktor Kladivo | Search-by-MPN | JSON-LD ItemList |
+| Rebiop | Search-by-MPN | `/search/products?q=` |
+| Ferant | — | DNS failure as of 2026-04; skipped |
+| Strend | — | WordPress content site only; skipped |
+""")
+
 
 
 # ===========================================================================

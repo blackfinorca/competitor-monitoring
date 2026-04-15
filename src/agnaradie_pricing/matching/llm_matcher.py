@@ -14,7 +14,7 @@ candidate list:
 We then call the LLM once per unmatched listing, passing the listing + up to
 MAX_CANDIDATES candidates, and ask it to return the best match as JSON.
 
-Default model: Qwen (Alibaba DashScope OpenAI-compatible endpoint).
+Default backend: OpenAI (gpt-4o-mini or any compatible model).
 The client is model-agnostic — anything that implements LLMClient works.
 
 Confidence tiers
@@ -25,10 +25,10 @@ Threshold: results below MIN_CONFIDENCE are silently discarded.
 
 Usage
 -----
-    from agnaradie_pricing.matching.llm_matcher import QwenClient
+    from agnaradie_pricing.matching.llm_matcher import OpenAIClient
     from agnaradie_pricing.matching import match_product
 
-    client = QwenClient(api_key="sk-...", model="qwen-plus")
+    client = OpenAIClient(api_key="sk-...", model="gpt-4o-mini")
     result = match_product(product, listing, llm_client=client)
 """
 
@@ -37,6 +37,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+from collections import deque
+from threading import Lock
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
@@ -57,6 +60,91 @@ _STOP_WORDS = frozenset(
     " von fur mit fur zu und die der das".split()
 )
 
+# ---------------------------------------------------------------------------
+# Rate limits (TPM, RPM) per model — 90 % safety margin applied on use
+# Source: OpenAI platform limits (Tier 1)
+# ---------------------------------------------------------------------------
+
+_MODEL_LIMITS: dict[str, tuple[int, int]] = {
+    "gpt-5.1":                 (500_000, 500),
+    "gpt-5-mini":              (500_000, 500),
+    "gpt-5-nano":              (200_000, 500),
+    "gpt-4.1":                 (30_000,  500),
+    "gpt-4.1-mini":            (200_000, 500),
+    "gpt-4.1-nano":            (200_000, 500),
+    "o3":                      (30_000,  500),
+    "o4-mini":                 (200_000, 500),
+    "gpt-4o":                  (30_000,  500),
+    "gpt-4o-realtime-preview": (40_000,  200),
+    # Legacy
+    "gpt-4o-mini":             (200_000, 500),
+}
+
+_SAFETY_FACTOR = 0.90   # stay at 90 % of the published limit
+
+
+# ---------------------------------------------------------------------------
+# Sliding-window rate limiter (thread-safe)
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Token-bucket limiter over a 60-second sliding window.
+
+    Tracks (timestamp, token_count) entries.  Before each request it:
+      1. Prunes entries older than 60 s.
+      2. Checks whether adding this request would exceed RPM or TPM.
+      3. If yes, sleeps until the oldest blocking entry falls out of the window.
+    """
+
+    def __init__(self, tpm: int, rpm: int) -> None:
+        self._tpm = int(tpm * _SAFETY_FACTOR)
+        self._rpm = int(rpm * _SAFETY_FACTOR)
+        self._window: deque[tuple[float, int]] = deque()  # (ts, tokens)
+        self._lock = Lock()
+
+    def acquire(self, estimated_tokens: int) -> None:
+        """Block until capacity is available, then record the request."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - 60.0
+
+                # Prune old entries
+                while self._window and self._window[0][0] < cutoff:
+                    self._window.popleft()
+
+                current_rpm = len(self._window)
+                current_tpm = sum(t for _, t in self._window)
+
+                rpm_ok = current_rpm + 1 <= self._rpm
+                tpm_ok = current_tpm + estimated_tokens <= self._tpm
+
+                if rpm_ok and tpm_ok:
+                    self._window.append((now, estimated_tokens))
+                    return
+
+                # Calculate how long to wait
+                if not rpm_ok and self._window:
+                    # Wait until the oldest entry leaves the 60 s window
+                    sleep_for = (self._window[0][0] + 60.0) - now + 0.05
+                elif not tpm_ok and self._window:
+                    # Wait until enough tokens clear
+                    tokens_to_free = (current_tpm + estimated_tokens) - self._tpm
+                    cleared = 0
+                    sleep_for = 0.0
+                    for ts, tok in self._window:
+                        cleared += tok
+                        if cleared >= tokens_to_free:
+                            sleep_for = (ts + 60.0) - now + 0.05
+                            break
+                    if sleep_for <= 0:
+                        sleep_for = 1.0
+                else:
+                    sleep_for = 1.0
+
+            logger.debug("Rate limit: sleeping %.1f s", sleep_for)
+            time.sleep(max(sleep_for, 0.05))
+
 MatchResult = tuple[str, float]
 
 
@@ -72,19 +160,27 @@ class LLMClient(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Qwen (Alibaba DashScope) client
+# OpenAI client
 # ---------------------------------------------------------------------------
 
-_QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+_DEFAULT_MODEL = "o4-mini"
 
 
-class QwenClient:
-    """Thin httpx wrapper around the Qwen OpenAI-compatible chat endpoint."""
+class OpenAIClient:
+    """Thin httpx wrapper around the OpenAI chat completions endpoint.
+
+    Automatically enforces the per-model TPM and RPM limits from
+    _MODEL_LIMITS using a sliding 60-second window rate limiter.
+    Unknown models fall back to the most conservative published limit
+    (30,000 TPM / 500 RPM).
+    """
 
     def __init__(
         self,
         api_key: str,
-        model: str = "qwen-plus",
+        model: str = _DEFAULT_MODEL,
         timeout: float = 30.0,
         max_tokens: int = 256,
     ) -> None:
@@ -94,19 +190,26 @@ class QwenClient:
         self._max_tokens = max_tokens
         self._http = httpx.Client(timeout=timeout)
 
+        tpm, rpm = _MODEL_LIMITS.get(model, (30_000, 500))
+        self._rate_limiter = _RateLimiter(tpm=tpm, rpm=rpm)
+        logger.debug(
+            "OpenAIClient: model=%s  limits=TPM %d / RPM %d  (90%% safety)",
+            model, int(tpm * _SAFETY_FACTOR), int(rpm * _SAFETY_FACTOR),
+        )
+
     def complete(self, prompt: str) -> str:
+        # Estimate tokens: ~1 token per 4 chars for the prompt + max response
+        estimated_tokens = len(prompt) // 4 + self._max_tokens
+        self._rate_limiter.acquire(estimated_tokens)
+
         payload: dict = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self._max_tokens,
             "temperature": 0.0,      # deterministic — consistent matches
-            # Disable chain-of-thought thinking for Qwen3/3.5 models.
-            # Without this the model emits <think>…</think> tokens before the
-            # answer, which wastes tokens and slows down the response.
-            "enable_thinking": False,
         }
         response = self._http.post(
-            f"{_QWEN_BASE_URL}/chat/completions",
+            f"{_OPENAI_BASE_URL}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
@@ -117,7 +220,7 @@ class QwenClient:
         return response.json()["choices"][0]["message"]["content"]
 
     def __repr__(self) -> str:
-        return f"QwenClient(model={self.model!r})"
+        return f"OpenAIClient(model={self.model!r})"
 
 
 # ---------------------------------------------------------------------------

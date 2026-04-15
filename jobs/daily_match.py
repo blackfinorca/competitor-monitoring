@@ -124,16 +124,16 @@ def main(argv=None) -> dict[str, int]:
         # Layer 6: LLM fuzzy (opt-in)
         # -----------------------------------------------------------------
         if args.llm and unmatched_for_llm:
-            if not settings.qwen_api_key:
+            if not settings.openai_api_key:
                 logger.error(
-                    "QWEN_API_KEY not set — cannot run LLM layer. "
+                    "OPENAI_API_KEY not set — cannot run LLM layer. "
                     "Add it to your .env file."
                 )
             else:
-                from agnaradie_pricing.matching.llm_matcher import QwenClient
-                client = QwenClient(
-                    api_key=settings.qwen_api_key,
-                    model=settings.qwen_model,
+                from agnaradie_pricing.matching.llm_matcher import OpenAIClient
+                client = OpenAIClient(
+                    api_key=settings.openai_api_key,
+                    model=settings.openai_model,
                 )
 
                 logger.info(

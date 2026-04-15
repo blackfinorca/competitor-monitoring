@@ -22,4 +22,7 @@ class DoktorKladivoScraper(ShoptetGenericScraper):
         config: dict | None = None,
         http_client: httpx.Client | None = None,
     ):
-        super().__init__(config or DOKTOR_KLADIVO_CONFIG, http_client=http_client)
+        # Merge: DOKTOR_KLADIVO_CONFIG supplies search_path/search_query_param;
+        # caller-supplied config (e.g. from competitors.yaml) overrides url/rate_limit_rps.
+        merged = {**DOKTOR_KLADIVO_CONFIG, **(config or {})}
+        super().__init__(merged, http_client=http_client)

@@ -153,7 +153,8 @@ class _NaradieShopParser(HTMLParser):
             self._collect = "stock"
 
     def handle_endtag(self, tag: str) -> None:
-        self._tag_depth -= 1
+        if tag not in _VOID_ELEMENTS:
+            self._tag_depth -= 1
         self._collect = None
         if self._item is not None and self._tag_depth < self._item_depth:
             self.products.append(self._item)

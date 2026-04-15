@@ -28,7 +28,6 @@ from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
 from agnaradie_pricing.scrapers.persistence import save_competitor_listings
 from agnaradie_pricing.scrapers.rebiop import RebiopScraper
 from agnaradie_pricing.scrapers.shoptet_generic import ShoptetGenericScraper
-from agnaradie_pricing.scrapers.strend import StrendScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors
 
@@ -42,13 +41,13 @@ FEED_COMPETITORS = {
 }
 
 # Competitors that need search-by-MPN fallback — custom subclasses registered here.
+# strend_sk is excluded: site has no product catalogue (WordPress content site only).
 SEARCH_COMPETITORS = {
     "doktorkladivo_sk": DoktorKladivoScraper,
     "ahprofi_sk": AhProfiScraper,
     "naradieshop_sk": NaradieShopScraper,
     "toolzone_sk": ToolZoneScraper,
     "rebiop_sk": RebiopScraper,
-    "strend_sk": StrendScraper,
     "boukal_cz": BoukalScraper,
 }
 

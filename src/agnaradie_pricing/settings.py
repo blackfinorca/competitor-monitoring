@@ -25,8 +25,8 @@ except ModuleNotFoundError:
         def __init__(self, **data: Any) -> None:
             data.setdefault("database_url", os.getenv("DATABASE_URL"))
             data.setdefault("anthropic_api_key", os.getenv("ANTHROPIC_API_KEY"))
-            data.setdefault("qwen_api_key", os.getenv("QWEN_API_KEY") or None)
-            data.setdefault("qwen_model", os.getenv("QWEN_MODEL", "qwen3-235b-a22b"))
+            data.setdefault("openai_api_key", os.getenv("OPENAI_API_KEY") or None)
+            data.setdefault("openai_model", os.getenv("OPENAI_MODEL", "o4-mini"))
             data.setdefault("log_level", os.getenv("LOG_LEVEL", "INFO"))
             data.setdefault("alert_webhook_url", os.getenv("ALERT_WEBHOOK_URL") or None)
             super().__init__(**data)
@@ -40,8 +40,8 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 class Settings(BaseSettings):
     database_url: str = Field(default="postgresql+psycopg://user:pass@localhost:5432/agnaradie")
     anthropic_api_key: str | None = Field(default=None)
-    qwen_api_key: str | None = Field(default=None)
-    qwen_model: str = Field(default="qwen3-235b-a22b")
+    openai_api_key: str | None = Field(default=None)
+    openai_model: str = Field(default="o4-mini")
     log_level: str = Field(default="INFO")
     alert_webhook_url: str | None = Field(default=None)
 

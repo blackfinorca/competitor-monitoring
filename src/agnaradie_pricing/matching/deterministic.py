@@ -30,6 +30,11 @@ def match_deterministic(
     ):
         return ("exact_mpn", 1.0)
 
+    # Listing has a structured MPN but no brand field — high confidence match
+    # (covers JS-rendered competitors like boukal.cz that don't surface brand)
+    if product_mpn and listing_mpn and product_mpn == listing_mpn and not listing_brand:
+        return ("mpn_no_brand", 0.90)
+
     return None
 
 
