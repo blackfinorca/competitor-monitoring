@@ -113,10 +113,9 @@ def _get_competitor_scrapers() -> dict:
             scrapers[cid] = cls(configs[cid])
     return scrapers
 
-@st.cache_resource
 def _get_llm_client():
-    # Read directly from env so this works even if the Settings cache is stale
-    # (st.cache_resource persists across hot-reloads within the same process).
+    # Not cached — re-read env on every call so .env changes take effect
+    # without restarting the server. OpenAIClient is lightweight to construct.
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         try:
@@ -139,13 +138,11 @@ def _get_llm_client():
 # Navigation — top tab bar
 # ---------------------------------------------------------------------------
 
-_llm_status = "disabled (no OPENAI_API_KEY)"
 try:
-    _llm = _get_llm_client()
-    if _llm:
-        _llm_status = str(_llm)
+    _llm_client_check = _get_llm_client()
+    _llm_status = str(_llm_client_check) if _llm_client_check else "disabled (no OPENAI_API_KEY)"
 except Exception:
-    pass
+    _llm_status = "disabled (no OPENAI_API_KEY)"
 st.caption(f"ToolZone Pricing  ·  Today: {date.today().isoformat()}  ·  LLM: {_llm_status}")
 
 tab1, tab2, tab3 = st.tabs(["🔍 Product Search", "💰 Price compare", "🩺 Coverage Health"])

@@ -3,51 +3,61 @@ competitors:
     name: Doktor Kladivo
     url: https://www.doktorkladivo.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # per worker; 4 workers → ~4 req/s total
+    workers: 4
   - id: ahprofi_sk
     name: AH Profi
     url: https://www.ahprofi.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # per worker; 3 workers → ~3 req/s total
+    workers: 3
   - id: naradieshop_sk
     name: NaradieShop
     url: https://www.naradieshop.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # per worker; 3 workers → ~3 req/s total
+    workers: 3
   - id: madmat_sk
     name: Madmat
     url: https://www.madmat.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # XML feed download — no benefit from parallelism
+    workers: 1
   - id: centrumnaradia_sk
     name: Centrum Naradia
     url: https://www.centrumnaradia.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # XML feed download
+    workers: 1
   - id: ferant_sk
     name: Ferant
     url: https://www.ferant.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # DNS fails — skipped
+    workers: 1
   - id: rebiop_sk
     name: Rebiop
     url: https://www.rebiop.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # per worker; 3 workers → ~3 req/s total
+    workers: 3
   - id: strend_sk
     name: Strend
     url: https://www.strend.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 1   # content site only — skipped
+    workers: 1
   - id: boukal_cz
     name: Boukal
     url: https://www.boukal.cz
     weight: 1.0
-    rate_limit_rps: 3
+    rate_limit_rps: 3   # per worker; 4 workers → ~12 req/s total (CZ site)
+    workers: 4
   - id: toolzone_sk
     name: ToolZone
     url: https://www.toolzone.sk
     weight: 1.0
-    rate_limit_rps: 1
+    rate_limit_rps: 4   # per worker; 16 workers → ~64 req/s (our own store)
+    workers: 16
     own_store: true  # owned by AG Naradie — exclude from competitor benchmarks
 

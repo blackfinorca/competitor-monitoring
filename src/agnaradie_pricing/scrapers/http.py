@@ -19,10 +19,14 @@ Usage
 from __future__ import annotations
 
 import random
+import threading
 import time
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, TypeVar
 
 import httpx
+
+T = TypeVar("T")
 
 # A recent Chrome UA on macOS — realistic and widely seen
 _DEFAULT_UA = (
@@ -42,6 +46,50 @@ _DEFAULT_HEADERS = {
 
 # Back-off: seconds to wait after a 429/503 before retrying
 _BACKOFF_SCHEDULE = [5, 15, 60]  # 3 attempts, then give up
+
+# Thread-local storage for per-thread httpx clients used by parallel scrapers
+_thread_local = threading.local()
+
+
+def get_thread_client(timeout: float = 12.0) -> httpx.Client:
+    """Return a thread-local httpx.Client, creating one on first access per thread.
+
+    Use this in parallel worker functions instead of a shared ``self.http_client``
+    so that each worker thread has its own connection pool.
+    """
+    if not hasattr(_thread_local, "client"):
+        _thread_local.client = make_client(timeout=timeout)
+    return _thread_local.client
+
+
+def chunked(items: list, size: int):
+    """Yield successive slices of *items* of at most *size* elements each."""
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
+def parallel_map(
+    items: list,
+    fn: Callable[..., T | None],
+    *,
+    workers: int = 1,
+) -> list[T]:
+    """Apply fn(item) to every item using a thread pool; None results are dropped.
+
+    Parameters
+    ----------
+    items    Sequence of inputs.
+    fn       Callable that takes one item and returns a result or None.
+    workers  Number of parallel threads (1 = sequential, no overhead).
+    """
+    if workers <= 1 or not items:
+        return [r for item in items if (r := fn(item)) is not None]
+    results: list[T] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for r in pool.map(fn, items):
+            if r is not None:
+                results.append(r)
+    return results
 
 
 def make_client(

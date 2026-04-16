@@ -52,6 +52,11 @@ SEARCH_COMPETITORS = {
 }
 
 
+# Flush scraped listings to the DB after this many are buffered.
+# Smaller = more frequent commits (more durable); larger = fewer DB round-trips.
+_SAVE_BATCH_SIZE = 200
+
+
 def build_scraper(config: dict):
     cid = config["id"]
     if cid in SEARCH_COMPETITORS:
@@ -85,19 +90,37 @@ def main(
 
         scraper = build_scraper(comp_config)
         logger.info("Scraping %s …", cid)
+
+        saved = 0
+        buffer: list = []
         try:
-            listings = scraper.run_daily(catalogue)
+            for listing in scraper.run_daily_iter(catalogue):
+                buffer.append(listing)
+                if len(buffer) >= _SAVE_BATCH_SIZE:
+                    with factory() as session:
+                        save_competitor_listings(session, buffer)
+                        session.commit()
+                    saved += len(buffer)
+                    logger.info(
+                        "  %s: flushed %d listings (%d total so far)",
+                        cid, len(buffer), saved,
+                    )
+                    buffer.clear()
         except Exception:
-            logger.exception("Error scraping %s", cid)
-            counts[cid] = 0
-            continue
+            logger.exception(
+                "Error scraping %s after %d saved — flushing partial batch", cid, saved
+            )
 
-        with factory() as session:
-            save_competitor_listings(session, listings)
-            session.commit()
+        # Flush whatever remains (including after an error mid-stream)
+        if buffer:
+            with factory() as session:
+                save_competitor_listings(session, buffer)
+                session.commit()
+            saved += len(buffer)
+            buffer.clear()
 
-        counts[cid] = len(listings)
-        logger.info("Saved %d listings for %s", len(listings), cid)
+        counts[cid] = saved
+        logger.info("Saved %d listings for %s", saved, cid)
 
     return counts
 

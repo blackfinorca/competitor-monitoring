@@ -38,7 +38,13 @@ from urllib.parse import urljoin
 import httpx
 
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
-from agnaradie_pricing.scrapers.http import make_client, polite_get
+from agnaradie_pricing.scrapers.http import (
+    chunked,
+    get_thread_client,
+    make_client,
+    parallel_map,
+    polite_get,
+)
 
 
 TOOLZONE_CONFIG = {
@@ -55,6 +61,10 @@ TOOLZONE_CONFIG = {
 
 _SITEMAP_URL = "https://www.toolzone.sk/sitemap.xml"
 _FEED_SENTINEL = "sitemap://toolzone"
+
+# Number of product URLs to scrape before yielding a batch to the orchestrator.
+# Smaller = more frequent DB flushes; 200 is a good balance (≈ 25s at 8 RPS).
+_FETCH_CHUNK = 200
 
 
 class ToolZoneScraper(CompetitorScraper):
@@ -74,17 +84,23 @@ class ToolZoneScraper(CompetitorScraper):
         """Always return sentinel; actual URL list is built in fetch_feed."""
         return _FEED_SENTINEL
 
-    def fetch_feed(self, feed_url: str) -> list[CompetitorListing]:
+    def run_daily_iter(self, ag_catalogue):
+        """Yield listings in chunks of _FETCH_CHUNK so the orchestrator can
+        flush to DB after each chunk rather than waiting for all ~41k pages."""
         product_urls = self._get_product_urls()
-        listings: list[CompetitorListing] = []
-        for url in product_urls:
+        workers: int = int(self.config.get("workers", 1))
+
+        def _scrape(url: str) -> CompetitorListing | None:
             try:
-                listing = self._scrape_product_page(url)
-                if listing is not None:
-                    listings.append(listing)
+                return self._scrape_product_page(url)
             except Exception:
-                pass  # skip individual failures
-        return listings
+                return None
+
+        for chunk in chunked(product_urls, _FETCH_CHUNK):
+            yield from parallel_map(chunk, _scrape, workers=workers)
+
+    def fetch_feed(self, feed_url: str) -> list[CompetitorListing]:
+        return list(self.run_daily_iter(None))
 
     def search_by_mpn(self, brand: str, mpn: str) -> CompetitorListing | None:
         return self.search_by_query(f"{brand} {mpn}".strip())
@@ -131,8 +147,10 @@ class ToolZoneScraper(CompetitorScraper):
         return [u for u in all_urls if any(slug in u.lower() for slug in lower_slugs)]
 
     def _scrape_product_page(self, url: str) -> CompetitorListing | None:
+        # get_thread_client() returns a thread-local client, so parallel workers
+        # each use their own connection pool without sharing self.http_client.
         response = polite_get(
-            self.http_client,
+            get_thread_client(),
             url,
             min_rps=self._rate_limit_rps,
             referer="https://www.toolzone.sk/",

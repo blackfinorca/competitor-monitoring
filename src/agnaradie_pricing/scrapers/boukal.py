@@ -52,7 +52,7 @@ import httpx
 
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
 from agnaradie_pricing.scrapers.heureka_feed import HeurekaFeedMixin
-from agnaradie_pricing.scrapers.http import make_client, polite_get
+from agnaradie_pricing.scrapers.http import get_thread_client, make_client, parallel_map, polite_get
 from agnaradie_pricing.scrapers.inspection import HEUREKA_FEED_PATHS
 
 
@@ -83,27 +83,38 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
         self.http_client = http_client or make_client(timeout=15.0)
 
     # ------------------------------------------------------------------
-    def run_daily(self, ag_catalogue: list[dict]) -> list[CompetitorListing]:
-        """Open every product page for each brand in the catalogue."""
+    def run_daily_iter(self, ag_catalogue: list[dict]):
+        """Yield listings one brand at a time.
+
+        Each brand's products are scraped (and yielded) before moving to the
+        next brand, so the orchestrator can flush to DB after each brand's
+        batch rather than waiting for the full multi-brand crawl to finish.
+        """
         feed_url = self.discover_feed()
         if feed_url:
-            return self.fetch_feed(feed_url)
+            yield from self.fetch_feed(feed_url)
+            return
 
-        # Group catalogue items by brand slug to know which brand pages to crawl
         brand_slugs: set[str] = set()
         for item in ag_catalogue:
             brand = item.get("brand") or ""
             if brand:
                 brand_slugs.add(_brand_to_slug(brand))
 
-        results: list[CompetitorListing] = []
         for brand_slug in brand_slugs:
-            results.extend(self._scrape_all_brand_products(brand_slug))
-        return results
+            yield from self._scrape_all_brand_products(brand_slug)
+
+    def run_daily(self, ag_catalogue: list[dict]) -> list[CompetitorListing]:
+        return list(self.run_daily_iter(ag_catalogue))
 
     def _scrape_all_brand_products(self, brand_slug: str) -> list[CompetitorListing]:
-        """Paginate through all pages of a brand, open every product page."""
-        results: list[CompetitorListing] = []
+        """Paginate through all pages of a brand, open every product page.
+
+        Phase 1 (sequential): collect all product URL paths via pagination.
+        Phase 2 (parallel):   scrape each product page using worker threads.
+        """
+        # --- Phase 1: collect all product URL paths ---
+        all_url_paths: list[str] = []
         page = 1
 
         while True:
@@ -120,19 +131,24 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
 
             product_urls = _extract_product_urls(resp.text)
             has_next = _has_next_page(resp.text)
-
-            for url_path in product_urls:
-                listing = _scrape_product_page(
-                    self.http_client, url_path, self.base_url, self.competitor_id,
-                )
-                if listing:
-                    results.append(listing)
+            all_url_paths.extend(product_urls)
 
             if not has_next or not product_urls:
                 break
             page += 1
 
-        return results
+        # --- Phase 2: scrape product pages in parallel ---
+        workers: int = int(self.config.get("workers", 1))
+        base_url = self.base_url
+        competitor_id = self.competitor_id
+        rps = self._rate_limit_rps
+
+        def _scrape(url_path: str) -> CompetitorListing | None:
+            return _scrape_product_page(
+                get_thread_client(), url_path, base_url, competitor_id, rps=rps,
+            )
+
+        return parallel_map(all_url_paths, _scrape, workers=workers)
 
     # ------------------------------------------------------------------
     def discover_feed(self) -> str | None:
@@ -164,7 +180,8 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
                 break
             for url_path in _extract_product_urls(resp.text):
                 listing = _scrape_product_page(
-                    self.http_client, url_path, self.base_url, self.competitor_id
+                    self.http_client, url_path, self.base_url, self.competitor_id,
+                    rps=self._rate_limit_rps,
                 )
                 if listing and listing.mpn:
                     if re.sub(r"[\s\-]", "", listing.mpn).lower() == mpn_norm:
@@ -190,7 +207,10 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
             return None
 
         listings = [
-            _scrape_product_page(self.http_client, u, self.base_url, self.competitor_id)
+            _scrape_product_page(
+                self.http_client, u, self.base_url, self.competitor_id,
+                rps=self._rate_limit_rps,
+            )
             for u in url_paths
         ]
         rest = tokens[1:]
@@ -236,10 +256,12 @@ def _scrape_product_page(
     url_path: str,
     base_url: str,
     competitor_id: str,
+    *,
+    rps: float = 3.0,
 ) -> CompetitorListing | None:
     full_url = base_url.rstrip("/") + url_path
     try:
-        resp = client.get(full_url)
+        resp = polite_get(client, full_url, min_rps=rps)
         resp.raise_for_status()
     except httpx.HTTPError:
         return None
