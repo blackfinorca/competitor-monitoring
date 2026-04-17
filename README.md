@@ -209,6 +209,38 @@ python jobs/daily_match.py --llm                     # + LLM layer
 python jobs/daily_match.py --llm --min-confidence 0.80
 ```
 
+### `export_manufacturer.py` — Export manufacturer comparison to Excel
+
+Exports all ToolZone products for a manufacturer with matched competitor prices side by side.
+One row per ToolZone product, one column group per competitor. Price differences are colour-coded.
+Includes a **Summary** sheet with per-competitor match rate and average price diff.
+
+```bash
+# All competitors → reports/knipex_2026-04-17.xlsx
+python jobs/export_manufacturer.py --manufacturer knipex
+
+# Specific competitors only
+python jobs/export_manufacturer.py --manufacturer knipex --only boukal_cz bo_import_cz agi_sk
+
+# Custom output path
+python jobs/export_manufacturer.py --manufacturer knipex --output reports/knipex-april.xlsx
+
+# Only high-confidence matches (EAN/MPN)
+python jobs/export_manufacturer.py --manufacturer knipex --min-confidence 0.90
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--manufacturer SLUG` | required | Brand to export (e.g. `knipex`) |
+| `-o / --output PATH` | `reports/{manufacturer}_YYYY-MM-DD.xlsx` | Output file |
+| `--only ID [ID ...]` | all | Include only these competitor IDs |
+| `--min-confidence FLOAT` | `0.72` | Minimum match confidence to include |
+
+**Colour coding (Diff% column):**
+🟢 Green = competitor cheaper than ToolZone · 🔴 Orange = competitor more expensive · 🟡 Yellow = within ±1%
+
+---
+
 ### `export_prices.py` — Export to CSV
 ```bash
 python jobs/export_prices.py                         # → reports/prices_YYYY-MM-DD.csv
