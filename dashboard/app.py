@@ -753,16 +753,18 @@ def _render_coverage_tab() -> None:
             .group_by(CompetitorListing.competitor_id)
         ).fetchall()
 
+        # Count distinct matched competitor listings from listing_matches
+        # (the table written by match_products.py / daily_match.py new pipeline)
         match_counts = session.execute(
-            select(
-                ProductMatch.competitor_id,
-                func.count(ProductMatch.id).label("matches"),
-            )
-            .where(ProductMatch.confidence >= Decimal("0.72"))
-            .group_by(ProductMatch.competitor_id)
+            text("""
+                SELECT cl.competitor_id,
+                       COUNT(DISTINCT lm.competitor_listing_id) AS matches
+                FROM listing_matches lm
+                JOIN competitor_listings cl ON cl.id = lm.competitor_listing_id
+                WHERE lm.confidence >= 0.72
+                GROUP BY cl.competitor_id
+            """)
         ).fetchall()
-
-        total_products = session.scalar(select(func.count(Product.id))) or 0
 
     if not listing_counts:
         st.info("No competitor listings in the last 7 days. Run a search or use the CLI scraper.")
@@ -774,18 +776,26 @@ def _render_coverage_tab() -> None:
 
     all_df = counts_df.merge(match_df, on="competitor_id", how="left")
     all_df["matches"] = all_df["matches"].fillna(0).astype(int)
+    # Match rate = matched listings / total scraped listings for that competitor
     all_df["match_rate"] = (
-        (all_df["matches"] / total_products * 100).round(1) if total_products else 0.0
+        (all_df["matches"] / all_df["listings"].replace(0, float("nan")) * 100)
+        .round(1)
+        .fillna(0.0)
     )
     all_df = all_df.sort_values("listings", ascending=False)
 
     competitor_df = all_df[~all_df["competitor_id"].isin(own_stores)]
     own_df = all_df[all_df["competitor_id"].isin(own_stores)]
 
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Total products", total_products)
-    k2.metric("Active competitors (7d)", len(competitor_df))
-    k3.metric("Total listings (7d)", int(competitor_df["listings"].sum()) if not competitor_df.empty else 0)
+    total_listings = int(competitor_df["listings"].sum()) if not competitor_df.empty else 0
+    total_matched = int(competitor_df["matches"].sum()) if not competitor_df.empty else 0
+    overall_rate = round(total_matched / total_listings * 100, 1) if total_listings else 0.0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Active competitors (7d)", len(competitor_df))
+    k2.metric("Total listings (7d)", total_listings)
+    k3.metric("Total matched", total_matched)
+    k4.metric("Overall match rate", f"{overall_rate:.1f}%")
 
     st.divider()
 
@@ -853,7 +863,7 @@ order — the first layer that fires wins. Higher confidence = stronger evidence
 | 4 | `regex_ean_title` | EAN-13 extracted from listing title matches | **0.93** |
 | 5 | `regex_mpn_title` | MPN extracted from title + brand agrees | **0.90** |
 | 6 | `regex_mpn_no_brand` | MPN extracted from title; brand absent or mismatched | **0.72–0.78** |
-| 7 *(opt-in)* | `llm_fuzzy` | o4-mini title/spec similarity after pre-filter | **0.75–0.84** |
+| 7 *(opt-in)* | `llm_fuzzy` | gpt-4o-mini title/spec similarity after pre-filter | **0.75–0.84** |
 
 **LLM pre-filter** (layer 7): before calling the API, candidates are narrowed to
 ≤ 5 products that share the same brand (or have no brand) **and** have ≥ 2 meaningful
@@ -865,7 +875,7 @@ abbreviations (e.g. `knipex` = `KNIPEX`).
 
 **Confidence thresholds used elsewhere**:
 - Price Compare and recommendations: `≥ 0.85` (layers 1–5 high-confidence only)
-- Coverage Health match rate: `≥ 0.72` (all deterministic layers)
+- Coverage Health match rate: `≥ 0.72` (all deterministic layers) — shows what % of a competitor's scraped listings were matched to a ToolZone product
 - LLM layer default accept: `≥ 0.75` (overridable with `--min-confidence`)
 """)
 
