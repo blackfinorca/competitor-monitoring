@@ -13,6 +13,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -113,10 +114,9 @@ def _get_competitor_scrapers() -> dict:
             scrapers[cid] = cls(configs[cid])
     return scrapers
 
-@st.cache_resource
 def _get_llm_client():
-    # Read directly from env so this works even if the Settings cache is stale
-    # (st.cache_resource persists across hot-reloads within the same process).
+    # Not cached — re-read env on every call so .env changes take effect
+    # without restarting the server. OpenAIClient is lightweight to construct.
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         try:
@@ -139,16 +139,16 @@ def _get_llm_client():
 # Navigation — top tab bar
 # ---------------------------------------------------------------------------
 
-_llm_status = "disabled (no OPENAI_API_KEY)"
 try:
-    _llm = _get_llm_client()
-    if _llm:
-        _llm_status = str(_llm)
+    _llm_client_check = _get_llm_client()
+    _llm_status = str(_llm_client_check) if _llm_client_check else "disabled (no OPENAI_API_KEY)"
 except Exception:
-    pass
+    _llm_status = "disabled (no OPENAI_API_KEY)"
 st.caption(f"ToolZone Pricing  ·  Today: {date.today().isoformat()}  ·  LLM: {_llm_status}")
 
-tab1, tab2, tab3 = st.tabs(["🔍 Product Search", "💰 Price compare", "🩺 Coverage Health"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔍 Product Search", "💰 Price compare", "🏭 By Manufacturer", "🩺 Coverage Health",
+])
 
 
 # ===========================================================================
@@ -882,10 +882,360 @@ abbreviations (e.g. `knipex` = `KNIPEX`).
 | NaradieShop | Search-by-MPN | ThirtyBees HTML parser |
 | Doktor Kladivo | Search-by-MPN | JSON-LD ItemList |
 | Rebiop | Search-by-MPN | `/search/products?q=` |
+| BO-Import (CZ) | Manufacturer-page crawl | Authorized KNIPEX distributor CZ; JSON-LD; CZK→EUR |
+| AGI (SK) | Manufacturer-page crawl | rshop platform; JSON-LD; EAN via gtin; EUR prices |
 | Ferant | — | DNS failure as of 2026-04; skipped |
 | Strend | — | WordPress content site only; skipped |
 """)
 
+
+
+# ===========================================================================
+# Page 3 — Manufacturer View
+# ===========================================================================
+
+@st.cache_data(ttl=300, show_spinner="Loading manufacturer data…")
+def _load_manufacturer_data(manufacturer: str) -> dict:
+    """Load all competitor listings for a given manufacturer brand.
+
+    Uses listing_matches as the source of truth so EAN, MPN, regex and LLM
+    matches all appear in the UI.
+
+    Returns:
+        toolzone: list of {id, ean, title, price_eur, in_stock, url, scraped_at}
+        competitors: {tz_id: {competitor_id: {price_eur, in_stock, url, scraped_at, match_type}}}
+        competitor_ids: sorted list of active competitor IDs found in data
+    """
+    with _session() as session:
+        # All ToolZone products for this brand (latest scrape per URL)
+        tz_rows = session.execute(
+            text("""
+                SELECT id, ean, title, price_eur, in_stock, url, scraped_at
+                FROM competitor_listings
+                WHERE competitor_id = 'toolzone_sk'
+                  AND brand LIKE :brand
+                ORDER BY title
+            """),
+            {"brand": f"%{manufacturer}%"},
+        ).fetchall()
+
+        if not tz_rows:
+            return {"toolzone": [], "competitors": {}, "competitor_ids": []}
+
+        # All competitor matches via listing_matches (covers EAN, MPN, regex, LLM)
+        tz_ids = [r.id for r in tz_rows]
+        placeholders = ",".join(str(i) for i in tz_ids)
+        comp_rows = session.execute(
+            text(f"""
+                SELECT
+                    lm.toolzone_listing_id  AS tz_id,
+                    lm.match_type,
+                    lm.confidence,
+                    cl.competitor_id,
+                    cl.price_eur,
+                    cl.in_stock,
+                    cl.url,
+                    cl.scraped_at
+                FROM listing_matches lm
+                JOIN competitor_listings cl ON cl.id = lm.competitor_listing_id
+                WHERE lm.toolzone_listing_id IN ({placeholders})
+                  AND cl.scraped_at = (
+                      SELECT MAX(cl2.scraped_at)
+                      FROM competitor_listings cl2
+                      WHERE cl2.id = lm.competitor_listing_id
+                  )
+            """)
+        ).fetchall()
+
+    competitors: dict[int, dict[str, dict]] = {}  # tz_id → {cid → data}
+    comp_ids: set[str] = set()
+    for row in comp_rows:
+        if row.tz_id not in competitors:
+            competitors[row.tz_id] = {}
+        # Keep lowest price if same competitor appears via multiple match paths
+        existing = competitors[row.tz_id].get(row.competitor_id)
+        price = float(row.price_eur) if row.price_eur else None
+        if existing is None or (price and price < existing["price_eur"]):
+            competitors[row.tz_id][row.competitor_id] = {
+                "price_eur": price,
+                "in_stock": row.in_stock,
+                "url": row.url or "",
+                "scraped_at": row.scraped_at,
+                "match_type": row.match_type,
+            }
+        comp_ids.add(row.competitor_id)
+
+    return {
+        "toolzone": [
+            {
+                "id": r.id,
+                "ean": r.ean,
+                "title": r.title,
+                "price_eur": float(r.price_eur) if r.price_eur else None,
+                "in_stock": r.in_stock,
+                "url": r.url or "",
+                "scraped_at": r.scraped_at,
+            }
+            for r in tz_rows
+        ],
+        "competitors": competitors,
+        "competitor_ids": sorted(comp_ids),
+    }
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_manufacturer_list() -> list[str]:
+    """Return distinct brand values from ToolZone listings, sorted."""
+    with _session() as session:
+        rows = session.execute(
+            text("""
+                SELECT DISTINCT brand FROM competitor_listings
+                WHERE competitor_id = 'toolzone_sk'
+                  AND brand IS NOT NULL AND brand != ''
+                ORDER BY brand
+            """)
+        ).fetchall()
+    return [r.brand for r in rows]
+
+
+def _render_manufacturer_tab() -> None:
+    st.header("By Manufacturer")
+
+    manufacturers = _load_manufacturer_list()
+
+    if not manufacturers:
+        st.info(
+            "No manufacturer data yet. "
+            "Run: `python jobs/manufacturer_scrape.py --manufacturer knipex`"
+        )
+        return
+
+    # ---- Controls row -------------------------------------------------------
+    col_mfr, col_stock, col_per_page, col_refresh, col_scrape = st.columns([3, 1, 1, 1, 2])
+
+    with col_mfr:
+        selected = st.selectbox(
+            "Manufacturer", manufacturers,
+            index=manufacturers.index("KNIPEX") if "KNIPEX" in manufacturers else 0,
+            label_visibility="collapsed",
+        )
+
+    with col_stock:
+        in_stock_only = st.toggle("In stock only", value=False)
+
+    with col_per_page:
+        per_page = st.selectbox("Per page", [10, 20, 50], index=0, label_visibility="visible", key="mfr_per_page_select")
+
+    with col_refresh:
+        if st.button("↺ Refresh", use_container_width=True, help="Reload data from the database", key="mfr_refresh"):
+            _load_manufacturer_data.clear()
+            _load_manufacturer_list.clear()
+            st.rerun()
+
+    with col_scrape:
+        if st.button(
+            f"▶ Scrape {selected}",
+            use_container_width=True,
+            help="Run manufacturer_scrape.py for this manufacturer",
+            type="primary",
+        ):
+            jobs_dir = Path(__file__).parent.parent / "jobs"
+            proc = subprocess.Popen(
+                [sys.executable, str(jobs_dir / "manufacturer_scrape.py"),
+                 "--manufacturer", selected.lower().replace(" ", "-")],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            st.session_state["mfr_scrape_proc"] = proc
+            st.session_state["mfr_scrape_manufacturer"] = selected
+            st.toast(f"Scrape started for {selected}", icon="🚀")
+
+    # ---- Scrape progress expander -------------------------------------------
+    if "mfr_scrape_proc" in st.session_state:
+        proc = st.session_state["mfr_scrape_proc"]
+        with st.expander(
+            f"Scrape output — {st.session_state.get('mfr_scrape_manufacturer', '')}",
+            expanded=True,
+        ):
+            if proc.poll() is None:
+                st.info("Scrape in progress… refresh the page once it completes.")
+            else:
+                out, _ = proc.communicate()
+                st.code(out or "(no output)")
+                if st.button("Clear output", key="mfr_clear_output"):
+                    del st.session_state["mfr_scrape_proc"]
+                    del st.session_state["mfr_scrape_manufacturer"]
+                    st.rerun()
+
+    # ---- Load data ----------------------------------------------------------
+    data = _load_manufacturer_data(selected)
+    toolzone_products = data["toolzone"]
+    competitors_data = data["competitors"]
+    competitor_ids = data["competitor_ids"]
+
+    if not toolzone_products:
+        st.warning(
+            f"No ToolZone listings found for **{selected}**. "
+            f"Run: `python jobs/manufacturer_scrape.py --manufacturer {selected.lower()}`"
+        )
+        return
+
+    # ---- Apply in-stock filter and sort by number of competitor matches ------
+    visible_products = [
+        p for p in toolzone_products
+        if not in_stock_only or p["in_stock"]
+    ]
+    visible_products.sort(
+        key=lambda p: len(competitors_data.get(p["id"], {})),
+        reverse=True,
+    )
+
+    if not visible_products:
+        st.info("No in-stock products found for this manufacturer.")
+        return
+
+    # ---- KPI row ------------------------------------------------------------
+    matched_count = sum(1 for p in visible_products if competitors_data.get(p["id"]))
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Products", len(visible_products))
+    k2.metric("With competitor match", matched_count)
+    k3.metric("Competitors", len(competitor_ids))
+    if visible_products:
+        prices = [p["price_eur"] for p in visible_products if p["price_eur"]]
+        if prices:
+            k4.metric("Avg ToolZone price", f"€ {sum(prices)/len(prices):.2f}")
+
+    st.divider()
+
+    # ---- Pagination ---------------------------------------------------------
+    total_pages = max(1, -(-len(visible_products) // per_page))
+    mfr_page_key = f"mfr_page_{selected}"
+    if mfr_page_key not in st.session_state:
+        st.session_state[mfr_page_key] = 1
+    if st.session_state.get(f"mfr_per_page_{selected}") != per_page:
+        st.session_state[mfr_page_key] = 1
+        st.session_state[f"mfr_per_page_{selected}"] = per_page
+
+    page_num = st.session_state[mfr_page_key]
+    start = (page_num - 1) * per_page
+    page_products = visible_products[start: start + per_page]
+
+    # ---- Tiles --------------------------------------------------------------
+    for product in page_products:
+        ean = product["ean"] or ""
+        tz_price = product["price_eur"]
+        comp_data = competitors_data.get(product["id"], {})
+
+        with st.container(border=True):
+            left, right = st.columns([1, 3], gap="large")
+
+            # --- Left: ToolZone reference card (compact) ---------------------
+            with left:
+                # Title — truncated so it doesn't push the column too wide
+                title = product["title"] or "—"
+                st.markdown(f"**{title[:80]}{'…' if len(title) > 80 else ''}**")
+
+                # Price + stock on one compact line
+                price_str = f"**€ {tz_price:.2f}**" if tz_price else "**—**"
+                if product["in_stock"] is True:
+                    stock_str = "✅ in stock"
+                elif product["in_stock"] is False:
+                    stock_str = "❌ out of stock"
+                else:
+                    stock_str = ""
+                st.markdown(f"{price_str}{'  ·  ' + stock_str if stock_str else ''}")
+
+                # EAN + freshness as captions
+                meta_parts = []
+                if ean:
+                    meta_parts.append(f"EAN {ean}")
+                if product["scraped_at"]:
+                    ts = pd.Timestamp(product["scraped_at"]).tz_localize(None)
+                    h = int((pd.Timestamp.utcnow().tz_localize(None) - ts).total_seconds() / 3600)
+                    freshness = f"🟢 {h}h ago" if h < 26 else (f"🟡 {h}h ago" if h < 50 else f"🔴 {h // 24}d ago")
+                    meta_parts.append(freshness)
+                if meta_parts:
+                    st.caption("  ·  ".join(meta_parts))
+
+                if product["url"]:
+                    st.caption(f"[Open on ToolZone ↗]({product['url']})")
+
+            # --- Right: competitor prices ------------------------------------
+            with right:
+                if not comp_data:
+                    st.caption("No competitor matches found.")
+                else:
+                    n = len(comp_data)
+                    st.caption(f"{n} competitor match{'es' if n != 1 else ''}")
+
+                    comp_rows = []
+                    for cid, c in sorted(comp_data.items(), key=lambda x: x[1]["price_eur"]):
+                        c_price = c["price_eur"]
+                        diff_pct = (c_price - tz_price) / tz_price * 100 if tz_price and c_price else None
+
+                        if diff_pct is None:
+                            diff_str = "—"
+                        elif diff_pct > 0.5:
+                            diff_str = f"▲ +{diff_pct:.1f}%"
+                        elif diff_pct < -0.5:
+                            diff_str = f"▼ {diff_pct:.1f}%"
+                        else:
+                            diff_str = f"≈ {diff_pct:+.1f}%"
+
+                        stock = "✅" if c["in_stock"] else ("❌" if c["in_stock"] is False else "—")
+
+                        ts = pd.Timestamp(c["scraped_at"]).tz_localize(None)
+                        h = int((pd.Timestamp.utcnow().tz_localize(None) - ts).total_seconds() / 3600)
+                        freshness = f"{h}h ago" if h < 48 else f"{h // 24}d ago"
+
+                        match_badge = {
+                            "exact_ean":   "EAN ✓",
+                            "exact_mpn":   "MPN ✓",
+                            "mpn_no_brand": "MPN ~",
+                            "regex_ean_title": "Regex ~",
+                            "regex_mpn_title": "Regex ~",
+                            "regex_mpn_no_brand": "Regex ~",
+                            "llm_fuzzy":   "LLM ~",
+                        }.get(c.get("match_type", ""), c.get("match_type", ""))
+
+                        comp_rows.append({
+                            "Store":       _display_name(cid),
+                            "Price":       f"€ {c_price:.2f}",
+                            "vs ToolZone": diff_str,
+                            "Match":       match_badge,
+                            "In Stock":    stock,
+                            "Scraped":     freshness,
+                            "URL":         c["url"],
+                        })
+
+                    st.dataframe(
+                        pd.DataFrame(comp_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "URL": st.column_config.LinkColumn("Link", display_text="Open ↗"),
+                        },
+                    )
+
+    # ---- Pagination controls ------------------------------------------------
+    st.divider()
+    nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
+    with nav_left:
+        if st.button("← Previous", disabled=(page_num <= 1), use_container_width=True, key="mfr_prev"):
+            st.session_state[mfr_page_key] = page_num - 1
+            st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<div style='text-align:center; padding-top:6px;'>Page {page_num} of {total_pages}"
+            f"  —  showing {start + 1}–{min(start + per_page, len(visible_products))} "
+            f"of {len(visible_products)}</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_right:
+        if st.button("Next →", disabled=(page_num >= total_pages), use_container_width=True, key="mfr_next"):
+            st.session_state[mfr_page_key] = page_num + 1
+            st.rerun()
 
 
 # ===========================================================================
@@ -899,4 +1249,7 @@ with tab2:
     _render_price_compare_tab()
 
 with tab3:
+    _render_manufacturer_tab()
+
+with tab4:
     _render_coverage_tab()

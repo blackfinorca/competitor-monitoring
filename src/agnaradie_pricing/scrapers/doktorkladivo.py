@@ -33,7 +33,7 @@ from urllib.parse import urljoin
 import httpx
 
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
-from agnaradie_pricing.scrapers.http import make_client, polite_get
+from agnaradie_pricing.scrapers.http import get_thread_client, make_client, parallel_map, polite_get
 from agnaradie_pricing.scrapers.shoptet_generic import ShoptetGenericScraper
 
 
@@ -73,10 +73,32 @@ class DoktorKladivoScraper(CompetitorScraper):
     # Full catalogue crawl
     # ------------------------------------------------------------------
 
-    def run_daily(self, ag_catalogue: list[dict]) -> list[CompetitorListing]:
-        """Crawl the full Doktor Kladivo catalogue and return all listings."""
-        results: list[CompetitorListing] = []
+    def run_daily_iter(self, ag_catalogue):
+        """Yield listings one category page at a time.
+
+        Interleaves pagination and scraping: fetch one listing page (24 URLs),
+        scrape those product pages in parallel, yield the results, then move to
+        the next listing page. This means up to 24 products are saved to DB
+        after every ~24 product-page requests rather than waiting for all ~10k.
+        """
+        workers: int = int(self.config.get("workers", 1))
+        competitor_id = self.competitor_id
+        rps = self._rate_limit_rps
         offset = 0
+
+        def _scrape(path: str) -> CompetitorListing | None:
+            full_url = urljoin(_BASE_URL + "/", path.lstrip("/"))
+            try:
+                resp = polite_get(
+                    get_thread_client(),
+                    full_url,
+                    min_rps=rps,
+                    referer=_BASE_URL + "/",
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError:
+                return None
+            return _parse_product_page(resp.text, competitor_id, full_url)
 
         while True:
             cat_url = urljoin(_BASE_URL + "/", self._catalogue_path)
@@ -84,7 +106,7 @@ class DoktorKladivoScraper(CompetitorScraper):
                 resp = polite_get(
                     self.http_client,
                     cat_url,
-                    min_rps=self._rate_limit_rps,
+                    min_rps=rps,
                     params={"f": offset} if offset > 0 else {},
                 )
             except httpx.HTTPError:
@@ -93,24 +115,21 @@ class DoktorKladivoScraper(CompetitorScraper):
             if resp.status_code != 200:
                 break
 
-            product_paths = _extract_product_paths(resp.text)
-            if not product_paths:
-                break  # no more products
+            paths = _extract_product_paths(resp.text)
+            if not paths:
+                break
 
-            for path in product_paths:
-                full_url = urljoin(_BASE_URL + "/", path.lstrip("/"))
-                listing = self._scrape_product_page(full_url)
-                if listing:
-                    results.append(listing)
-
+            # Scrape this page's products in parallel, yield immediately
+            yield from parallel_map(paths, _scrape, workers=workers)
             offset += self._page_size
 
-        return results
+    def run_daily(self, ag_catalogue: list[dict]) -> list[CompetitorListing]:
+        return list(self.run_daily_iter(ag_catalogue))
 
     def _scrape_product_page(self, url: str) -> CompetitorListing | None:
         try:
             resp = polite_get(
-                self.http_client,
+                get_thread_client(),
                 url,
                 min_rps=self._rate_limit_rps,
                 referer=_BASE_URL + "/",
