@@ -15,13 +15,17 @@ Strategy per competitor (from live inspection):
 
 import logging
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from agnaradie_pricing.catalogue.ingest import load_catalogue_csv
 from agnaradie_pricing.db.session import make_session_factory
+from agnaradie_pricing.scrapers.agi import AgiScraper
 from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
+from agnaradie_pricing.scrapers.bo_import import BoImportScraper
 from agnaradie_pricing.scrapers.boukal import BoukalScraper
 from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
 from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
@@ -32,6 +36,7 @@ from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors
 
 logger = logging.getLogger(__name__)
+_log_lock = threading.Lock()
 
 # Competitors with a known Heureka feed — use ShoptetGenericScraper as-is
 # (discover_feed probes the standard paths; fetch_feed parses the XML).
@@ -49,6 +54,8 @@ SEARCH_COMPETITORS = {
     "toolzone_sk": ToolZoneScraper,
     "rebiop_sk": RebiopScraper,
     "boukal_cz": BoukalScraper,
+    "bo_import_cz": BoImportScraper,
+    "agi_sk": AgiScraper,
 }
 
 
@@ -65,9 +72,51 @@ def build_scraper(config: dict):
     return ShoptetGenericScraper(config)
 
 
+def _scrape_one(
+    comp_config: dict,
+    catalogue: list[dict],
+    factory,
+) -> tuple[str, int]:
+    """Scrape one competitor and save to DB in batches. Thread-safe."""
+    cid = comp_config["id"]
+    scraper = build_scraper(comp_config)
+
+    def _log(msg, *args):
+        with _log_lock:
+            logger.info(msg, *args)
+
+    _log("Scraping %s …", cid)
+    saved, buffer = 0, []
+    try:
+        for listing in scraper.run_daily_iter(catalogue):
+            buffer.append(listing)
+            if len(buffer) >= _SAVE_BATCH_SIZE:
+                with factory() as session:
+                    save_competitor_listings(session, buffer)
+                    session.commit()
+                saved += len(buffer)
+                _log("  %s: flushed %d listings (%d total so far)", cid, len(buffer), saved)
+                buffer.clear()
+    except Exception:
+        with _log_lock:
+            logger.exception("Error scraping %s after %d saved — flushing partial batch", cid, saved)
+
+    # Flush remainder
+    if buffer:
+        with factory() as session:
+            save_competitor_listings(session, buffer)
+            session.commit()
+        saved += len(buffer)
+        buffer.clear()
+
+    _log("Saved %d listings for %s", saved, cid)
+    return cid, saved
+
+
 def main(
     catalogue_path: Path = Path("data/ag_catalogue.csv"),
     only: list[str] | None = None,
+    sequential: bool = False,
 ) -> dict[str, int]:
     settings = Settings()
     competitors = load_competitors()
@@ -77,50 +126,41 @@ def main(
     ]
 
     factory = make_session_factory(settings)
+
+    active = [
+        c for c in competitors
+        if (c["id"] in FEED_COMPETITORS or c["id"] in SEARCH_COMPETITORS)
+        and (only is None or c["id"] in only)
+    ]
+
+    skipped = [
+        c["id"] for c in competitors
+        if c["id"] not in FEED_COMPETITORS and c["id"] not in SEARCH_COMPETITORS
+        and (only is None or c["id"] in only)
+    ]
+    for cid in skipped:
+        logger.info("Skipping %s — scraper not yet implemented", cid)
+
     counts: dict[str, int] = {}
 
-    for comp_config in competitors:
-        cid = comp_config["id"]
-        if only and cid not in only:
-            continue
-        if cid not in FEED_COMPETITORS and cid not in SEARCH_COMPETITORS:
-            logger.info("Skipping %s — scraper not yet implemented", cid)
-            counts[cid] = 0
-            continue
-
-        scraper = build_scraper(comp_config)
-        logger.info("Scraping %s …", cid)
-
-        saved = 0
-        buffer: list = []
-        try:
-            for listing in scraper.run_daily_iter(catalogue):
-                buffer.append(listing)
-                if len(buffer) >= _SAVE_BATCH_SIZE:
-                    with factory() as session:
-                        save_competitor_listings(session, buffer)
-                        session.commit()
-                    saved += len(buffer)
-                    logger.info(
-                        "  %s: flushed %d listings (%d total so far)",
-                        cid, len(buffer), saved,
-                    )
-                    buffer.clear()
-        except Exception:
-            logger.exception(
-                "Error scraping %s after %d saved — flushing partial batch", cid, saved
-            )
-
-        # Flush whatever remains (including after an error mid-stream)
-        if buffer:
-            with factory() as session:
-                save_competitor_listings(session, buffer)
-                session.commit()
-            saved += len(buffer)
-            buffer.clear()
-
-        counts[cid] = saved
-        logger.info("Saved %d listings for %s", saved, cid)
+    if sequential or len(active) <= 1:
+        for comp_config in active:
+            cid, n = _scrape_one(comp_config, catalogue, factory)
+            counts[cid] = n
+    else:
+        with ThreadPoolExecutor(max_workers=len(active)) as pool:
+            futures = {
+                pool.submit(_scrape_one, c, catalogue, factory): c["id"]
+                for c in active
+            }
+            for future in as_completed(futures):
+                try:
+                    cid, n = future.result()
+                    counts[cid] = n
+                except Exception:
+                    cid = futures[future]
+                    logger.exception("Competitor %s raised an unhandled exception", cid)
+                    counts[cid] = 0
 
     return counts
 
@@ -142,9 +182,14 @@ if __name__ == "__main__":
         metavar="PATH",
         help="Path to AG catalogue CSV (default: data/ag_catalogue.csv)",
     )
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Disable parallel scraping (run competitors one by one — useful for debugging)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    result = main(catalogue_path=args.catalogue, only=args.only)
+    result = main(catalogue_path=args.catalogue, only=args.only, sequential=args.sequential)
     for cid, n in result.items():
         print(f"  {cid}: {n} listings")

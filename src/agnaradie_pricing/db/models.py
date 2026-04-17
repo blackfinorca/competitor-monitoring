@@ -51,6 +51,7 @@ class CompetitorListing(Base):
     __table_args__ = (
         Index("idx_cl_competitor_scraped", "competitor_id", "scraped_at"),
         Index("idx_cl_brand_mpn", "brand", "mpn"),
+        UniqueConstraint("competitor_id", "url", name="uq_cl_competitor_url"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -67,6 +68,39 @@ class CompetitorListing(Base):
     in_stock: Mapped[bool | None] = mapped_column(Boolean)
     url: Mapped[str | None] = mapped_column(Text)
     scraped_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ListingMatch(Base):
+    """Cross-listing match: ToolZone reference listing → competitor listing.
+
+    Populated by jobs/match_products.py.  One row per (toolzone_listing, competitor_listing) pair.
+    The unique constraint prevents duplicate matches on re-runs.
+    """
+    __tablename__ = "listing_matches"
+    __table_args__ = (
+        UniqueConstraint(
+            "toolzone_listing_id",
+            "competitor_listing_id",
+            name="uq_listing_match",
+        ),
+        Index("idx_lm_toolzone", "toolzone_listing_id"),
+        Index("idx_lm_competitor", "competitor_listing_id"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    toolzone_listing_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False
+    )
+    competitor_listing_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False
+    )
+    match_type: Mapped[str] = mapped_column(Text, nullable=False)   # exact_ean / llm_fuzzy / …
+    confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 

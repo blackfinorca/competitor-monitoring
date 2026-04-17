@@ -405,7 +405,7 @@ def _save_toolzone_listing(listing: CompetitorListing, session: Session) -> None
     """Save ToolZone listing to competitor_listings and create a self-match."""
     from agnaradie_pricing.scrapers.persistence import save_competitor_listings
 
-    rows = save_competitor_listings(session, [listing])
+    save_competitor_listings(session, [listing])
     session.flush()
 
     # Find the product we just upserted

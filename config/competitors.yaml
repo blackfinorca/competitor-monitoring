@@ -53,6 +53,18 @@ competitors:
     weight: 1.0
     rate_limit_rps: 3   # per worker; 4 workers → ~12 req/s total (CZ site)
     workers: 4
+  - id: bo_import_cz
+    name: BO-Import
+    url: https://www.bo-import.cz
+    weight: 1.0
+    rate_limit_rps: 2.0
+    workers: 4
+  - id: agi_sk
+    name: AGI
+    url: https://www.agi.sk
+    weight: 1.0
+    rate_limit_rps: 2.0
+    workers: 4
   - id: toolzone_sk
     name: ToolZone
     url: https://www.toolzone.sk

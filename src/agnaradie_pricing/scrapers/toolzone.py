@@ -134,6 +134,83 @@ class ToolZoneScraper(CompetitorScraper):
         return self._scrape_product_page(urls[0])
 
     # ------------------------------------------------------------------
+    # Manufacturer-page scraping (manufacturer_scrape.py entry point)
+    # ------------------------------------------------------------------
+
+    def get_manufacturer_slugs(self) -> list[tuple[str, str]]:
+        """Fetch /vyrobci/ and return [(display_name, slug), ...] for all manufacturers.
+
+        Slug is the URL path segment used in /vyrobce/{slug}/.
+        """
+        url = f"{self.base_url.rstrip('/')}/vyrobci/"
+        try:
+            resp = polite_get(self.http_client, url, min_rps=0.5)
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            return []
+        slugs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        # Two link structures in the HTML:
+        #   Featured (3): <a href="vyrobce/slug/"><img ...><h2>Name</h2><p>...</p></a>
+        #   Others:       <a href="vyrobce/slug/"><img ... alt="Name"></a>
+        for m in re.finditer(
+            r'href="(?:[^"]*?/)?vyrobce/([^/"]+)/"[^>]*>([\s\S]*?)</a>',
+            resp.text,
+        ):
+            slug = m.group(1).strip()
+            if not slug or slug in seen:
+                continue
+            block = m.group(2)
+            h2 = re.search(r'<h2[^>]*>([^<]+)</h2>', block)
+            if h2:
+                name = h2.group(1).strip()
+            else:
+                alt = re.search(r'alt="([^"]+)"', block)
+                name = alt.group(1).strip() if alt else slug
+            seen.add(slug)
+            slugs.append((name, slug))
+        return slugs
+
+    def run_manufacturer_iter(self, manufacturer_slug: str):
+        """Scrape all products for one manufacturer via /vyrobce/{slug}/katalog-stranaX.
+
+        Yields CompetitorListing objects; flushes a parallel batch per page.
+        """
+        workers: int = int(self.config.get("workers", 1))
+        competitor_id = self.competitor_id
+        rps = self._rate_limit_rps
+        base = self.base_url.rstrip("/")
+
+        def _scrape(url: str) -> CompetitorListing | None:
+            try:
+                response = polite_get(
+                    get_thread_client(), url, min_rps=rps,
+                    referer=f"{base}/vyrobce/{manufacturer_slug}/",
+                )
+                response.raise_for_status()
+                return _parse_product_page(response.text, competitor_id, url)
+            except Exception:
+                return None
+
+        page = 1
+        while True:
+            if page == 1:
+                page_url = f"{base}/vyrobce/{manufacturer_slug}/"
+            else:
+                page_url = f"{base}/vyrobce/{manufacturer_slug}/katalog-strana{page}"
+            try:
+                resp = polite_get(self.http_client, page_url, min_rps=rps)
+            except httpx.HTTPError:
+                break
+            if resp.status_code != 200:
+                break
+            product_urls = _extract_manufacturer_page_product_urls(resp.text)
+            if not product_urls:
+                break
+            yield from parallel_map(product_urls, _scrape, workers=workers)
+            page += 1
+
+    # ------------------------------------------------------------------
     def _get_product_urls(self) -> list[str]:
         response = polite_get(self.http_client, _SITEMAP_URL, min_rps=0.2, jitter=1.0)
         response.raise_for_status()
@@ -157,6 +234,26 @@ class ToolZoneScraper(CompetitorScraper):
         )
         response.raise_for_status()
         return _parse_product_page(response.text, self.competitor_id, url)
+
+
+# ---------------------------------------------------------------------------
+# Manufacturer listing page helpers
+# ---------------------------------------------------------------------------
+
+_MFR_PRODUCT_URL_RE = re.compile(
+    r'href="(https?://www\.toolzone\.sk/produkt/[^"]+\.htm)"'
+)
+
+
+def _extract_manufacturer_page_product_urls(html: str) -> list[str]:
+    """Return deduplicated absolute product URLs from a manufacturer listing page."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for url in _MFR_PRODUCT_URL_RE.findall(html):
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
 
 
 # ---------------------------------------------------------------------------

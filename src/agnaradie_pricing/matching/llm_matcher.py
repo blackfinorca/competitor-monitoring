@@ -165,7 +165,7 @@ class LLMClient(Protocol):
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
 
-_DEFAULT_MODEL = "o4-mini"
+_DEFAULT_MODEL = "gpt-4o-mini"
 
 
 class OpenAIClient:
@@ -202,12 +202,21 @@ class OpenAIClient:
         estimated_tokens = len(prompt) // 4 + self._max_tokens
         self._rate_limiter.acquire(estimated_tokens)
 
+        # o-series reasoning models (o1, o3, o4-*) use max_completion_tokens,
+        # do not accept temperature, and should use reasoning_effort="low"
+        # since product name matching needs no chain-of-thought.
+        is_reasoning = self.model.startswith(("o1", "o3", "o4"))
         payload: dict = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self._max_tokens,
-            "temperature": 0.0,      # deterministic — consistent matches
         }
+        if is_reasoning:
+            payload["max_completion_tokens"] = self._max_tokens
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["max_tokens"] = self._max_tokens
+            payload["temperature"] = 0.0
+
         response = self._http.post(
             f"{_OPENAI_BASE_URL}/chat/completions",
             headers={
@@ -319,8 +328,7 @@ Different size or variant of the same model line is NOT a match.
 Return JSON only:
 {{
   "match_index": <1-based index of best match, or null if no confident match>,
-  "confidence": <float 0.0-1.0>,
-  "reasoning": "<one sentence>"
+  "confidence": <float 0.0-1.0>
 }}"""
 
 
@@ -331,23 +339,26 @@ Return JSON only:
 def _parse_response(
     raw: str, candidates: list[dict]
 ) -> tuple[dict, MatchResult] | None:
+    if not raw or not raw.strip():
+        # Happens when max_completion_tokens was exhausted by reasoning before output
+        logger.warning("LLM returned empty response (token budget exhausted by reasoning)")
+        return None
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.DOTALL)
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if not m:
-            logger.warning("LLM returned non-JSON: %s", raw[:200])
+            logger.warning("LLM returned non-JSON (%d chars): %s", len(raw), raw[:200])
             return None
         try:
             data = json.loads(m.group(0))
         except json.JSONDecodeError:
-            logger.warning("LLM JSON parse failed: %s", raw[:200])
+            logger.warning("LLM JSON parse failed (%d chars): %s", len(raw), raw[:200])
             return None
 
     idx = data.get("match_index")
     confidence = data.get("confidence")
-    reasoning = data.get("reasoning", "")
 
     if idx is None or confidence is None:
         return None
@@ -359,7 +370,7 @@ def _parse_response(
         return None
 
     if confidence < _MIN_CONFIDENCE:
-        logger.debug("LLM match below threshold (%.2f): %s", confidence, reasoning)
+        logger.debug("LLM match below threshold (%.2f)", confidence)
         return None
 
     if idx < 1 or idx > len(candidates):
@@ -368,10 +379,7 @@ def _parse_response(
 
     matched_product = candidates[idx - 1]
     result: MatchResult = ("llm_fuzzy", round(min(confidence, 0.84), 2))
-    logger.debug(
-        "LLM matched → product_id=%s  conf=%.2f  reason: %s",
-        matched_product.get("id"), result[1], reasoning,
-    )
+    logger.debug("LLM matched → product_id=%s  conf=%.2f", matched_product.get("id"), result[1])
     return (matched_product, result)
 
 

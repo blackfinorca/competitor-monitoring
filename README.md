@@ -63,17 +63,86 @@ python jobs/daily_scrape.py --only boukal_cz madmat_sk
 # Use a different catalogue file
 python jobs/daily_scrape.py --catalogue data/my_catalogue.csv
 
-# Combine
-python jobs/daily_scrape.py --only boukal_cz --catalogue data/my_catalogue.csv
+# Debug: run one competitor at a time (no parallelism)
+python jobs/daily_scrape.py --sequential --only ahprofi_sk
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--only ID [ID ...]` | all | Scrape only the listed competitor IDs |
 | `--catalogue PATH` | `data/ag_catalogue.csv` | Path to the AG catalogue CSV |
+| `--sequential` | off | Disable parallel scraping; run competitors one by one (useful for debugging) |
 
 **Active competitor IDs:**
-`doktorkladivo_sk`, `ahprofi_sk`, `naradieshop_sk`, `toolzone_sk`, `rebiop_sk`, `boukal_cz`, `madmat_sk`, `centrumnaradia_sk`
+`toolzone_sk`, `madmat_sk`, `centrumnaradia_sk`, `boukal_cz`, `bo_import_cz`, `ahprofi_sk`, `naradieshop_sk`, `doktorkladivo_sk`, `rebiop_sk`, `agi_sk`
+
+---
+
+### `manufacturer_scrape.py` — Scrape all products for one manufacturer
+
+Scrapes ToolZone + all enabled competitors for a specific manufacturer brand (e.g. Knipex, Wiha). Use this before `match_products.py` when you want fresh data.
+
+```bash
+# Scrape all competitors for Knipex
+python jobs/manufacturer_scrape.py --manufacturer knipex
+
+# Custom brand display name (used for feed/search filtering)
+python jobs/manufacturer_scrape.py --manufacturer wiha --brand-name Wiha
+
+# Scrape specific competitors only
+python jobs/manufacturer_scrape.py --manufacturer knipex --only boukal_cz bo_import_cz
+
+# Debug: run one competitor at a time
+python jobs/manufacturer_scrape.py --manufacturer knipex --sequential
+
+# List all available manufacturer slugs on ToolZone
+python jobs/manufacturer_scrape.py --list-manufacturers
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--manufacturer SLUG` | required | Manufacturer slug as used in ToolZone URLs (e.g. `knipex`, `wiha`, `format`) |
+| `--brand-name NAME` | derived from slug | Brand display name used in feed/search filtering |
+| `--only ID [ID ...]` | all | Scrape only these competitor IDs |
+| `--sequential` | off | Disable parallel execution; run competitors one by one |
+| `--list-manufacturers` | — | Print all manufacturer slugs available on ToolZone and exit |
+
+---
+
+### `match_products.py` — Scrape → match → report pipeline
+
+End-to-end pipeline for a single manufacturer: optionally scrapes fresh data, runs EAN matching, optionally runs LLM fuzzy matching, and prints a price-comparison report.
+
+```bash
+# EAN match only, print report
+python jobs/match_products.py --manufacturer knipex
+
+# Scrape fresh data first, then EAN + LLM match
+python jobs/match_products.py --manufacturer knipex --scrape --llm
+
+# LLM match without re-scraping
+python jobs/match_products.py --manufacturer knipex --llm
+
+# Restrict to specific competitors
+python jobs/match_products.py --manufacturer knipex --only boukal_cz bo_import_cz
+
+# Re-match listings that already have a match record
+python jobs/match_products.py --manufacturer knipex --force --llm
+
+# Match without printing the report at the end
+python jobs/match_products.py --manufacturer knipex --llm --no-report
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--manufacturer BRAND` | all brands | Brand to scrape/match (e.g. `knipex`). Omit to run across all brands |
+| `--scrape` | off | Run `manufacturer_scrape.py` before matching (requires `--manufacturer`) |
+| `--llm` | off | Enable LLM fuzzy matching for listings without an EAN match (requires `OPENAI_API_KEY`) |
+| `--only ID [ID ...]` | all | Restrict scraping and matching to these competitor IDs |
+| `--force` | off | Re-match listings that already have a match record |
+| `--no-report` | off | Skip the price-comparison table printed at the end |
+
+LLM matches are saved immediately as they are found and printed to the terminal in real time. Requires `OPENAI_API_KEY` in `.env`. Model defaults to `gpt-4o-mini` (configurable via `OPENAI_MODEL`).
 
 ---
 
