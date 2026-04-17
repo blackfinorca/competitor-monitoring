@@ -170,6 +170,20 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run daily competitor scraping.")
     parser.add_argument(
+        "--manufacturer",
+        metavar="SLUG",
+        help=(
+            "Scrape all products for this manufacturer brand across ToolZone and "
+            "all competitors (e.g. --manufacturer knipex). Delegates to "
+            "manufacturer_scrape.py; mutually exclusive with --catalogue."
+        ),
+    )
+    parser.add_argument(
+        "--brand-name",
+        metavar="NAME",
+        help="Brand display name for feed/search filtering (default: derived from --manufacturer slug)",
+    )
+    parser.add_argument(
         "--only",
         nargs="+",
         metavar="COMPETITOR_ID",
@@ -190,6 +204,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    result = main(catalogue_path=args.catalogue, only=args.only, sequential=args.sequential)
+
+    if args.manufacturer:
+        # Manufacturer mode — delegate to manufacturer_scrape.main()
+        import manufacturer_scrape
+        result = manufacturer_scrape.main(
+            manufacturer_slug=args.manufacturer,
+            brand_name=args.brand_name,
+            only=set(args.only) if args.only else None,
+            sequential=args.sequential,
+        )
+    else:
+        result = main(catalogue_path=args.catalogue, only=args.only, sequential=args.sequential)
+
     for cid, n in result.items():
         print(f"  {cid}: {n} listings")

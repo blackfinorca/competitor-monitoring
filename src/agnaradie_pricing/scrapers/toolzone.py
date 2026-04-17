@@ -241,15 +241,22 @@ class ToolZoneScraper(CompetitorScraper):
 # ---------------------------------------------------------------------------
 
 _MFR_PRODUCT_URL_RE = re.compile(
-    r'href="(https?://www\.toolzone\.sk/produkt/[^"]+\.htm)"'
+    r'href="((?:https?://www\.toolzone\.sk)?/?produkt/[^"]+\.htm)"'
 )
+
+_TZ_BASE = "https://www.toolzone.sk"
 
 
 def _extract_manufacturer_page_product_urls(html: str) -> list[str]:
-    """Return deduplicated absolute product URLs from a manufacturer listing page."""
+    """Return deduplicated absolute product URLs from a manufacturer listing page.
+
+    ToolZone manufacturer pages use relative paths (produkt/foo.htm), so we
+    normalise them to absolute URLs.
+    """
     seen: set[str] = set()
     result: list[str] = []
-    for url in _MFR_PRODUCT_URL_RE.findall(html):
+    for raw in _MFR_PRODUCT_URL_RE.findall(html):
+        url = raw if raw.startswith("http") else f"{_TZ_BASE}/{raw.lstrip('/')}"
         if url not in seen:
             seen.add(url)
             result.append(url)

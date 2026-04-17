@@ -54,10 +54,16 @@ python jobs/daily_ingest.py
 Fetches prices from all active competitor scrapers and saves listings to the database.
 
 ```bash
-# Scrape all competitors
+# Scrape all competitors (full catalogue)
 python jobs/daily_scrape.py
 
-# Scrape specific competitors only
+# Scrape all products for one manufacturer across ToolZone + all competitors
+python jobs/daily_scrape.py --manufacturer knipex
+
+# Manufacturer scrape, specific competitors only
+python jobs/daily_scrape.py --manufacturer knipex --only boukal_cz bo_import_cz agi_sk
+
+# Scrape specific competitors only (full catalogue)
 python jobs/daily_scrape.py --only boukal_cz madmat_sk
 
 # Use a different catalogue file
@@ -69,8 +75,10 @@ python jobs/daily_scrape.py --sequential --only ahprofi_sk
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--manufacturer SLUG` | — | Scrape all products for this brand across ToolZone + all competitors (e.g. `knipex`). Switches to manufacturer-page crawl mode; `--catalogue` is ignored |
+| `--brand-name NAME` | derived from slug | Brand display name used for feed/search filtering when `--manufacturer` is set |
 | `--only ID [ID ...]` | all | Scrape only the listed competitor IDs |
-| `--catalogue PATH` | `data/ag_catalogue.csv` | Path to the AG catalogue CSV |
+| `--catalogue PATH` | `data/ag_catalogue.csv` | Path to the AG catalogue CSV (full-catalogue mode only) |
 | `--sequential` | off | Disable parallel scraping; run competitors one by one (useful for debugging) |
 
 **Active competitor IDs:**

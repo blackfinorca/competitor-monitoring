@@ -107,6 +107,14 @@ class BoukalScraper(HeurekaFeedMixin, CompetitorScraper):
     def run_daily(self, ag_catalogue: list[dict]) -> list[CompetitorListing]:
         return list(self.run_daily_iter(ag_catalogue))
 
+    def run_manufacturer_iter(self, manufacturer_slug: str):
+        """Yield all listings for a single manufacturer brand.
+
+        Uses Boukal's brand-page pagination with the manufacturer slug as the
+        brand slug (e.g. 'knipex' → /n/knipex/page/1/).
+        """
+        yield from self._scrape_all_brand_products(manufacturer_slug)
+
     def _scrape_all_brand_products(self, brand_slug: str) -> list[CompetitorListing]:
         """Paginate through all pages of a brand, open every product page.
 
