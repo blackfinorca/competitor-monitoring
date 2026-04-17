@@ -1,220 +1,226 @@
-# AG Naradie Pricing Agent
+# AG Naradie — Competitor Monitoring
 
-PoC competitor price monitoring agent for AG Naradie. The first round focuses on a small SKU subset, daily batch jobs, advisory recommendations, and a Streamlit dashboard.
+Price monitoring for AG Naradie / ToolZone. Scrapes competitor catalogues, matches products, generates pricing recommendations.
+
+---
 
 ## Setup
 
-Requires Python 3.11+ and Postgres 16 with pgvector enabled.
-
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-cp .env.example .env
-```
-
-Set `DATABASE_URL` and `OPENAI_API_KEY` in `.env`.
-
-## Database
-
-```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env          # set DATABASE_URL and OPENAI_API_KEY
 scripts/bootstrap_db.sh
 alembic upgrade head
 ```
 
-## Daily Pipeline
+---
 
-Run overnight in this order:
+## Pipeline Overview
 
-```cron
-00 01 * * * cd /path/to/competitor-monitoring && .venv/bin/python jobs/daily_ingest.py
-00 02 * * * cd /path/to/competitor-monitoring && .venv/bin/python jobs/daily_scrape.py
-00 04 * * * cd /path/to/competitor-monitoring && .venv/bin/python jobs/daily_match.py
-00 05 * * * cd /path/to/competitor-monitoring && .venv/bin/python jobs/daily_recommend.py
-30 05 * * * cd /path/to/competitor-monitoring && .venv/bin/python jobs/daily_alert.py
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────────┐
+│   SCRAPE    │ →  │    MATCH    │ →  │  RECOMMEND  │ →  │    ALERT     │
+│             │    │             │    │             │    │              │
+│ Fetch prices│    │ Link comp.  │    │ Build price │    │ Slack/webhook│
+│ from all    │    │ listings to │    │ snapshots & │    │ for priority │
+│ competitors │    │ ToolZone    │    │ actions     │    │ items        │
+└─────────────┘    └─────────────┘    └─────────────┘    └──────────────┘
+  daily_scrape       match_products     daily_recommend     daily_alert
+  manufacturer_      daily_match
+  scrape
+```
+
+Two scraping modes:
+
+```
+Full catalogue mode          Manufacturer mode
+──────────────────           ─────────────────
+daily_scrape.py              daily_scrape.py --manufacturer knipex
+  All competitors            manufacturer_scrape.py --manufacturer knipex
+  All products                 Phase 1: ToolZone catalogue crawl
+  MPN search / feeds           Phase 2: Catalogue competitors (parallel)
+                               Phase 3: Search competitors vs TZ MPNs
 ```
 
 ---
 
-## Job Reference
+## Competitors
 
-### `daily_ingest.py` — Load AG catalogue
+| ID | Name | Scrape method |
+|----|------|--------------|
+| `toolzone_sk` | ToolZone (own) | Manufacturer-page crawl · JSON-LD |
+| `madmat_sk` | Madmat | Heureka XML feed |
+| `centrumnaradia_sk` | Centrum Naradia | Heureka XML feed |
+| `boukal_cz` | Boukal (CZ) | Brand-page pagination · JSON-LD |
+| `bo_import_cz` | BO-Import (CZ) | Manufacturer-page crawl · JSON-LD · CZK→EUR |
+| `agi_sk` | AGI | Manufacturer-page crawl · JSON-LD |
+| `ahprofi_sk` | AH Profi | Search-by-MPN |
+| `naradieshop_sk` | NaradieShop | Search-by-MPN |
+| `doktorkladivo_sk` | Doktor Kladivo | Search-by-MPN |
+| `rebiop_sk` | Rebiop | Search-by-MPN |
 
-Reads `data/ag_catalogue.csv` and upserts products into the database. No flags.
-
-```bash
-python jobs/daily_ingest.py
-```
+> **Search-by-MPN competitors** require ToolZone reference products to work in manufacturer mode — always include `toolzone_sk` in `--only` when using them.
 
 ---
 
-### `daily_scrape.py` — Scrape competitor prices
+## Scraping
 
-Fetches prices from all active competitor scrapers and saves listings to the database.
+### By manufacturer (recommended for focused work)
 
 ```bash
-# Scrape all competitors (full catalogue)
-python jobs/daily_scrape.py
-
-# Scrape all products for one manufacturer across ToolZone + all competitors
+# All competitors, all Knipex products
 python jobs/daily_scrape.py --manufacturer knipex
 
-# Manufacturer scrape, specific competitors only
-python jobs/daily_scrape.py --manufacturer knipex --only boukal_cz bo_import_cz agi_sk
+# Catalogue competitors only (have brand/manufacturer pages)
+python jobs/daily_scrape.py --manufacturer knipex --only toolzone_sk boukal_cz bo_import_cz agi_sk
 
-# Scrape specific competitors only (full catalogue)
-python jobs/daily_scrape.py --only boukal_cz madmat_sk
+# One search competitor (needs toolzone_sk for MPN list)
+python jobs/daily_scrape.py --manufacturer knipex --only toolzone_sk naradieshop_sk
 
-# Use a different catalogue file
+# Custom brand display name (used in feed/search filtering)
+python jobs/daily_scrape.py --manufacturer knipex --brand-name Knipex
+```
+
+### By competitor (full catalogue)
+
+```bash
+# All competitors, full catalogue
+python jobs/daily_scrape.py
+
+# One competitor only
+python jobs/daily_scrape.py --only agi_sk
+
+# Multiple competitors
+python jobs/daily_scrape.py --only boukal_cz bo_import_cz madmat_sk
+
+# Different catalogue file
 python jobs/daily_scrape.py --catalogue data/my_catalogue.csv
-
-# Debug: run one competitor at a time (no parallelism)
-python jobs/daily_scrape.py --sequential --only ahprofi_sk
 ```
+
+### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--manufacturer SLUG` | — | Scrape all products for this brand across ToolZone + all competitors (e.g. `knipex`). Switches to manufacturer-page crawl mode; `--catalogue` is ignored |
-| `--brand-name NAME` | derived from slug | Brand display name used for feed/search filtering when `--manufacturer` is set |
-| `--only ID [ID ...]` | all | Scrape only the listed competitor IDs |
-| `--catalogue PATH` | `data/ag_catalogue.csv` | Path to the AG catalogue CSV (full-catalogue mode only) |
-| `--sequential` | off | Disable parallel scraping; run competitors one by one (useful for debugging) |
-
-**Active competitor IDs:**
-`toolzone_sk`, `madmat_sk`, `centrumnaradia_sk`, `boukal_cz`, `bo_import_cz`, `ahprofi_sk`, `naradieshop_sk`, `doktorkladivo_sk`, `rebiop_sk`, `agi_sk`
+| `--manufacturer SLUG` | — | Switch to manufacturer mode (e.g. `knipex`) |
+| `--brand-name NAME` | derived from slug | Brand display name for feed/search filtering |
+| `--only ID [ID ...]` | all | Restrict to these competitor IDs |
+| `--catalogue PATH` | `data/ag_catalogue.csv` | Catalogue CSV (full-catalogue mode only) |
+| `--sequential` | off | Disable parallelism — useful for debugging |
 
 ---
 
-### `manufacturer_scrape.py` — Scrape all products for one manufacturer
+## Matching
 
-Scrapes ToolZone + all enabled competitors for a specific manufacturer brand (e.g. Knipex, Wiha). Use this before `match_products.py` when you want fresh data.
+Links scraped competitor listings to ToolZone reference products. Layers run in order — first match wins.
 
-```bash
-# Scrape all competitors for Knipex
-python jobs/manufacturer_scrape.py --manufacturer knipex
-
-# Custom brand display name (used for feed/search filtering)
-python jobs/manufacturer_scrape.py --manufacturer wiha --brand-name Wiha
-
-# Scrape specific competitors only
-python jobs/manufacturer_scrape.py --manufacturer knipex --only boukal_cz bo_import_cz
-
-# Debug: run one competitor at a time
-python jobs/manufacturer_scrape.py --manufacturer knipex --sequential
-
-# List all available manufacturer slugs on ToolZone
-python jobs/manufacturer_scrape.py --list-manufacturers
+```
+Layer  Type                Trigger                              Confidence
+─────  ──────────────────  ───────────────────────────────────  ──────────
+  1    exact_ean           EAN barcode identical                  1.00
+  2    exact_mpn           Brand + MPN both match                 1.00
+  3    mpn_no_brand        MPN matches, listing has no brand      0.90
+  4    regex_ean_title     EAN-13 extracted from title            0.93
+  5    regex_mpn_title     MPN from title + brand agrees          0.90
+  6    regex_mpn_no_brand  MPN from title, brand absent           0.72–0.78
+  7*   llm_fuzzy           gpt-4o-mini title/spec similarity      0.75–0.84
+       * opt-in via --llm flag, requires OPENAI_API_KEY
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--manufacturer SLUG` | required | Manufacturer slug as used in ToolZone URLs (e.g. `knipex`, `wiha`, `format`) |
-| `--brand-name NAME` | derived from slug | Brand display name used in feed/search filtering |
-| `--only ID [ID ...]` | all | Scrape only these competitor IDs |
-| `--sequential` | off | Disable parallel execution; run competitors one by one |
-| `--list-manufacturers` | — | Print all manufacturer slugs available on ToolZone and exit |
-
----
-
-### `match_products.py` — Scrape → match → report pipeline
-
-End-to-end pipeline for a single manufacturer: optionally scrapes fresh data, runs EAN matching, optionally runs LLM fuzzy matching, and prints a price-comparison report.
+### By manufacturer and/or competitor
 
 ```bash
-# EAN match only, print report
+# Match all Knipex listings (all competitors)
 python jobs/match_products.py --manufacturer knipex
 
-# Scrape fresh data first, then EAN + LLM match
+# Match one competitor only
+python jobs/match_products.py --manufacturer knipex --only agi_sk
+
+# Scrape fresh + match in one command
+python jobs/match_products.py --manufacturer knipex --scrape
+
+# Full pipeline: scrape → match → LLM fuzzy → report
 python jobs/match_products.py --manufacturer knipex --scrape --llm
 
-# LLM match without re-scraping
-python jobs/match_products.py --manufacturer knipex --llm
+# LLM matching for one competitor
+python jobs/match_products.py --manufacturer knipex --only agi_sk --llm
 
-# Restrict to specific competitors
-python jobs/match_products.py --manufacturer knipex --only boukal_cz bo_import_cz
-
-# Re-match listings that already have a match record
+# Re-match already-matched listings (e.g. after model change)
 python jobs/match_products.py --manufacturer knipex --force --llm
-
-# Match without printing the report at the end
-python jobs/match_products.py --manufacturer knipex --llm --no-report
 ```
+
+### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--manufacturer BRAND` | all brands | Brand to scrape/match (e.g. `knipex`). Omit to run across all brands |
-| `--scrape` | off | Run `manufacturer_scrape.py` before matching (requires `--manufacturer`) |
-| `--llm` | off | Enable LLM fuzzy matching for listings without an EAN match (requires `OPENAI_API_KEY`) |
-| `--only ID [ID ...]` | all | Restrict scraping and matching to these competitor IDs |
-| `--force` | off | Re-match listings that already have a match record |
-| `--no-report` | off | Skip the price-comparison table printed at the end |
-
-LLM matches are saved immediately as they are found and printed to the terminal in real time. Requires `OPENAI_API_KEY` in `.env`. Model defaults to `gpt-4o-mini` (configurable via `OPENAI_MODEL`).
+| `--manufacturer BRAND` | all brands | Brand to match (e.g. `knipex`) |
+| `--scrape` | off | Run scraping first before matching |
+| `--llm` | off | Enable LLM fuzzy layer (requires `OPENAI_API_KEY`) |
+| `--only ID [ID ...]` | all | Restrict to these competitor IDs |
+| `--force` | off | Re-match listings that already have a match |
+| `--no-report` | off | Skip the price-comparison table at the end |
 
 ---
 
-### `daily_match.py` — Match listings to AG products
-
-Runs the deterministic + regex matching pipeline (layers 1–5) against all unmatched competitor listings. Optionally enables LLM-assisted fuzzy matching (layer 6).
+## Common Workflows
 
 ```bash
-# Deterministic matching only (layers 1–5)
-python jobs/daily_match.py
+# ── New manufacturer, first time ──────────────────────────────────────────
+python jobs/match_products.py --manufacturer knipex --scrape --llm
 
-# + LLM fuzzy layer (requires OPENAI_API_KEY in .env)
-python jobs/daily_match.py --llm
+# ── Refresh one competitor, then re-match ─────────────────────────────────
+python jobs/daily_scrape.py --manufacturer knipex --only agi_sk
+python jobs/match_products.py --manufacturer knipex --only agi_sk --llm
 
-# LLM with custom confidence threshold
-python jobs/daily_match.py --llm --min-confidence 0.80
-```
+# ── Search competitor (needs ToolZone MPN list) ───────────────────────────
+python jobs/daily_scrape.py --manufacturer knipex --only toolzone_sk naradieshop_sk
+python jobs/match_products.py --manufacturer knipex --only naradieshop_sk --llm
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--llm` | off | Enable LLM fuzzy matching for listings that deterministic layers couldn't match |
-| `--min-confidence FLOAT` | `0.75` | Minimum confidence score to accept an LLM match (0.0–1.0) |
-
----
-
-### `daily_recommend.py` — Generate pricing recommendations
-
-Builds daily pricing snapshots and writes recommendation rows for review. No flags.
-
-```bash
+# ── Full daily run (all brands, all competitors) ──────────────────────────
+python jobs/daily_scrape.py
+python jobs/match_products.py --llm
 python jobs/daily_recommend.py
-```
-
----
-
-### `daily_alert.py` — Send Slack alerts
-
-Posts high-priority recommendations to the Slack webhook defined in `ALERT_WEBHOOK_URL`. No flags. Silent if the env var is not set.
-
-```bash
 python jobs/daily_alert.py
 ```
 
 ---
 
-### `export_prices.py` — Export price comparison to CSV
+## Other Jobs
 
-Produces one CSV row per AG product with competitor prices in columns. ToolZone is the reference column; all other competitors follow alphabetically. Output is UTF-8 with BOM (opens directly in Excel).
-
+### `daily_ingest.py` — Load AG catalogue
 ```bash
-# Export all competitors to reports/prices_YYYY-MM-DD.csv
-python jobs/export_prices.py
-
-# Custom output path
-python jobs/export_prices.py --output reports/april-2026.csv
-
-# Export specific competitors only
-python jobs/export_prices.py --only toolzone_sk boukal_cz madmat_sk
+python jobs/daily_ingest.py                          # reads data/ag_catalogue.csv
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-o / --output PATH` | `reports/prices_YYYY-MM-DD.csv` | Output file path |
-| `--only ID [ID ...]` | all with matches | Include only these competitor IDs |
+### `daily_recommend.py` — Generate pricing recommendations
+```bash
+python jobs/daily_recommend.py                       # no flags
+```
+
+### `daily_alert.py` — Send Slack alerts
+```bash
+python jobs/daily_alert.py                           # silent if ALERT_WEBHOOK_URL not set
+```
+
+### `daily_match.py` — Batch match (legacy)
+```bash
+python jobs/daily_match.py                           # deterministic layers only
+python jobs/daily_match.py --llm                     # + LLM layer
+python jobs/daily_match.py --llm --min-confidence 0.80
+```
+
+### `export_prices.py` — Export to CSV
+```bash
+python jobs/export_prices.py                         # → reports/prices_YYYY-MM-DD.csv
+python jobs/export_prices.py --output april-2026.csv
+python jobs/export_prices.py --only toolzone_sk boukal_cz
+```
+
+### `manufacturer_scrape.py` — Scrape one manufacturer (direct)
+```bash
+python jobs/manufacturer_scrape.py --manufacturer knipex
+python jobs/manufacturer_scrape.py --list-manufacturers   # see all available slugs
+```
 
 ---
 
@@ -224,11 +230,25 @@ python jobs/export_prices.py --only toolzone_sk boukal_cz madmat_sk
 streamlit run dashboard/app.py
 ```
 
+Tabs: **Product Search** · **Price Compare** · **By Manufacturer** · **Coverage Health**
+
 ---
 
-## Adding Competitors
+## Cron (overnight full run)
 
-1. Add the competitor to `config/competitors.yaml`.
-2. Run `scripts/inspect_competitor.py https://example.sk`.
-3. Prefer a Heureka XML feed parser when a feed is available.
-4. Add fixture-based tests under `tests/scrapers/`.
+```cron
+00 01 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_ingest.py
+00 02 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_scrape.py
+00 04 * * *  cd /path/to/repo && .venv/bin/python jobs/match_products.py --llm
+00 05 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_recommend.py
+30 05 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_alert.py
+```
+
+---
+
+## Adding a Competitor
+
+1. Add entry to `config/competitors.yaml`
+2. Run `scripts/inspect_competitor.py https://example.sk`
+3. Prefer Heureka XML feed when available
+4. Add tests under `tests/scrapers/`
