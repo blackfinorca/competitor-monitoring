@@ -30,12 +30,15 @@ using the 'brand_slugs' config list (default: all brands scraped).
 """
 
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
 from agnaradie_pricing.scrapers.http import (
@@ -93,7 +96,8 @@ class ToolZoneScraper(CompetitorScraper):
         def _scrape(url: str) -> CompetitorListing | None:
             try:
                 return self._scrape_product_page(url)
-            except Exception:
+            except Exception as e:
+                log.debug("scrape error %s: %s", url, e)
                 return None
 
         for chunk in chunked(product_urls, _FETCH_CHUNK):
@@ -189,7 +193,8 @@ class ToolZoneScraper(CompetitorScraper):
                 )
                 response.raise_for_status()
                 return _parse_product_page(response.text, competitor_id, url)
-            except Exception:
+            except Exception as e:
+                log.debug("scrape error %s: %s", url, e)
                 return None
 
         page = 1

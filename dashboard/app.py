@@ -44,6 +44,7 @@ from agnaradie_pricing.db.models import (
     ProductMatch,
     Recommendation,
 )
+from agnaradie_pricing.constants import MIN_REPORT_CONFIDENCE
 from agnaradie_pricing.db.session import make_session_factory
 from agnaradie_pricing.orchestrator import SearchResult, search_product
 from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
@@ -761,9 +762,10 @@ def _render_coverage_tab() -> None:
                        COUNT(DISTINCT lm.competitor_listing_id) AS matches
                 FROM listing_matches lm
                 JOIN competitor_listings cl ON cl.id = lm.competitor_listing_id
-                WHERE lm.confidence >= 0.72
+                WHERE lm.confidence >= :min_conf
                 GROUP BY cl.competitor_id
-            """)
+            """),
+            {"min_conf": MIN_REPORT_CONFIDENCE},
         ).fetchall()
 
     if not listing_counts:

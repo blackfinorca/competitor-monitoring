@@ -42,6 +42,7 @@ Price currency: CZK (inc-VAT). Converted to EUR at a fixed approximate rate.
 """
 
 import json
+import logging
 import re
 import unicodedata
 from collections import defaultdict
@@ -49,6 +50,8 @@ from datetime import UTC, datetime
 from urllib.parse import urljoin
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
 from agnaradie_pricing.scrapers.heureka_feed import HeurekaFeedMixin
@@ -271,7 +274,8 @@ def _scrape_product_page(
     try:
         resp = polite_get(client, full_url, min_rps=rps)
         resp.raise_for_status()
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        log.debug("scrape error %s: %s", full_url, e)
         return None
 
     html = resp.text

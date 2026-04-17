@@ -90,7 +90,13 @@ class CompetitorScraper(ABC):
 
         def _search(brand_mpn: tuple) -> CompetitorListing | None:
             brand, mpn = brand_mpn
-            scraper = pool.get()
+            try:
+                scraper = pool.get(timeout=120)
+            except _queue.Empty:
+                raise RuntimeError(
+                    f"{self.competitor_id}: worker pool exhausted after 120s "
+                    "— a scraper instance never returned"
+                )
             try:
                 return scraper.search_by_mpn(brand, mpn)
             except Exception:

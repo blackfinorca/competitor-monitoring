@@ -110,7 +110,7 @@ def main(argv=None) -> dict[str, int]:
                 counts["skipped"] += 1
                 continue
 
-            _save_match(session, best_match, listing, best_result)
+            _save_match(session, best_match["id"], listing.competitor_id, listing.competitor_sku, *best_result)
             counts["matched"] += 1
             logger.debug(
                 "Matched %s (%s) → product_id=%d via %s",
@@ -160,7 +160,7 @@ def main(argv=None) -> dict[str, int]:
                     if match_result[1] < args.min_confidence:
                         continue
                     raw_listing = listing_by_id[listing_id]
-                    _save_match_raw(session, matched_product, raw_listing, match_result)
+                    _save_match(session, matched_product["id"], raw_listing["competitor_id"], raw_listing["competitor_sku"], *match_result)
                     counts["llm_matched"] += 1
 
                 session.commit()
@@ -173,39 +173,26 @@ def main(argv=None) -> dict[str, int]:
     return counts
 
 
-def _save_match(session, product: dict, listing, result: tuple) -> None:
-    match_type, confidence = result
+def _save_match(
+    session,
+    product_id: int,
+    competitor_id: str,
+    competitor_sku: str | None,
+    match_type: str,
+    confidence: float,
+) -> None:
     existing = session.scalars(
         select(ProductMatch).where(
-            ProductMatch.ag_product_id == product["id"],
-            ProductMatch.competitor_id == listing.competitor_id,
-            ProductMatch.competitor_sku == listing.competitor_sku,
+            ProductMatch.ag_product_id == product_id,
+            ProductMatch.competitor_id == competitor_id,
+            ProductMatch.competitor_sku == competitor_sku,
         )
     ).first()
     if existing is None:
         session.add(ProductMatch(
-            ag_product_id=product["id"],
-            competitor_id=listing.competitor_id,
-            competitor_sku=listing.competitor_sku,
-            match_type=match_type,
-            confidence=Decimal(str(confidence)),
-        ))
-
-
-def _save_match_raw(session, product: dict, listing_dict: dict, result: tuple) -> None:
-    match_type, confidence = result
-    existing = session.scalars(
-        select(ProductMatch).where(
-            ProductMatch.ag_product_id == product["id"],
-            ProductMatch.competitor_id == listing_dict["competitor_id"],
-            ProductMatch.competitor_sku == listing_dict["competitor_sku"],
-        )
-    ).first()
-    if existing is None:
-        session.add(ProductMatch(
-            ag_product_id=product["id"],
-            competitor_id=listing_dict["competitor_id"],
-            competitor_sku=listing_dict["competitor_sku"],
+            ag_product_id=product_id,
+            competitor_id=competitor_id,
+            competitor_sku=competitor_sku,
             match_type=match_type,
             confidence=Decimal(str(confidence)),
         ))

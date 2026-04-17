@@ -36,6 +36,7 @@ from urllib.parse import urlparse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from agnaradie_pricing.constants import CACHE_MAX_AGE_HOURS
 from agnaradie_pricing.db.models import (
     CompetitorListing as DBListing,
     Product,
@@ -46,12 +47,6 @@ from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
 from agnaradie_pricing.scrapers.persistence import save_competitor_listings
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-CACHE_MAX_AGE_HOURS = 24       # freshness threshold for both products and listings
 _EAN_RE = re.compile(r"^\d{8}(?:\d{4,5})?$")  # EAN-8, EAN-13
 _MPN_RE = re.compile(r"^\d{2}[-\s]\d{2}[-\s]\d{3}$|^[A-Z0-9]{2,}(?:[-/][A-Z0-9]+)+$", re.I)
 
@@ -187,10 +182,9 @@ def search_product(
         if listing is None:
             continue
         try:
-            rows = save_competitor_listings(session, [listing])
+            save_competitor_listings(session, [listing])
             session.flush()
-            # Run matching immediately for this listing
-            _match_and_save(product, listing, rows[0], session, llm_client=llm_client)
+            _match_and_save(product, listing, session, llm_client=llm_client)
             session.flush()
         except Exception as exc:
             logger.warning("Failed to save listing from %s: %s", cid, exc)
@@ -491,7 +485,6 @@ def _search_competitor(
 def _match_and_save(
     product: Product,
     listing: CompetitorListing,
-    listing_row: DBListing,
     session: Session,
     *,
     llm_client=None,

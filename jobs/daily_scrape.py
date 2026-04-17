@@ -33,6 +33,7 @@ from agnaradie_pricing.scrapers.persistence import save_competitor_listings
 from agnaradie_pricing.scrapers.rebiop import RebiopScraper
 from agnaradie_pricing.scrapers.shoptet_generic import ShoptetGenericScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
+from agnaradie_pricing.constants import SAVE_BATCH_SIZE as _SAVE_BATCH_SIZE
 from agnaradie_pricing.settings import Settings, load_competitors
 
 logger = logging.getLogger(__name__)
@@ -58,10 +59,6 @@ SEARCH_COMPETITORS = {
     "agi_sk": AgiScraper,
 }
 
-
-# Flush scraped listings to the DB after this many are buffered.
-# Smaller = more frequent commits (more durable); larger = fewer DB round-trips.
-_SAVE_BATCH_SIZE = 200
 
 
 def build_scraper(config: dict):

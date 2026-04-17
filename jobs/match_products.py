@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import yaml
 from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -48,18 +49,10 @@ logger = logging.getLogger(__name__)
 
 _MIN_LLM_CONFIDENCE = 0.75
 
-# Competitor display names for the report
-_DISPLAY_NAMES = {
-    "bo_import_cz":        "BO-Import",
-    "boukal_cz":           "Boukal",
-    "madmat_sk":           "MadMat",
-    "centrumnaradia_sk":   "CentrumNáradia",
-    "doktorkladivo_sk":    "DoktorKladivo",
-    "ahprofi_sk":          "AhProfi",
-    "naradieshop_sk":      "NaradieShop",
-    "rebiop_sk":           "Rebiop",
-    "agi_sk":              "AGI",
-    "toolzone_sk":         "ToolZone",
+_competitors_yaml = Path(__file__).parent.parent / "config" / "competitors.yaml"
+_DISPLAY_NAMES: dict[str, str] = {
+    c["id"]: c["name"]
+    for c in yaml.safe_load(_competitors_yaml.read_text())["competitors"]
 }
 
 

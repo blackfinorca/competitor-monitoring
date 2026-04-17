@@ -45,6 +45,7 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 
 from agnaradie_pricing.catalogue.normalise import normalise_brand
+from agnaradie_pricing.constants import MIN_LLM_CONFIDENCE as _MIN_CONFIDENCE
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MAX_CANDIDATES = 5          # products sent to LLM per listing
-_MIN_CONFIDENCE = 0.75       # discard weaker LLM hits
 _MIN_TOKEN_OVERLAP = 2       # pre-filter: minimum shared meaningful words
 _STOP_WORDS = frozenset(
     "na pre s z a so pri od do mm cm kg set kus ks sada the and for with"

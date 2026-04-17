@@ -2,7 +2,6 @@
 
 from decimal import Decimal
 
-from sqlalchemy import inspect
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
