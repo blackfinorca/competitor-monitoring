@@ -36,6 +36,8 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from agnaradie_pricing.scrapers.allegro import EXTRACT_JS
+
 log = logging.getLogger(__name__)
 
 _DEFAULT_INPUT = "data/allegro_eans.csv"
@@ -44,27 +46,6 @@ _CDP_URL = "http://localhost:9222"
 _BASE_URL = "https://allegro.sk"
 _FIELDNAMES = ["ean", "title", "seller", "seller_url", "price_eur", "delivery_eur", "scraped_at"]
 _COOKIE_FILE = "data/allegro_cookies.json"
-
-# JS to extract all offer articles from the product page
-_EXTRACT_JS = """() => {
-    return [...document.querySelectorAll("article")].map(a => {
-        const text = a.innerText || "";
-        const sellerM = text.match(/Predajca:\\s*([^\\n|]+)/);
-        const priceM  = text.match(/(\\d+[,.]\\d{2})\\s*\\u20ac/);
-        const delivM  = text.match(/(\\d+[,.]\\d{2})\\s*\\u20ac\\s*s doru/);
-        const links   = [...a.querySelectorAll("a")].filter(
-            l => l.href.includes("/obchod/") || l.href.includes("/uzivatel/")
-        );
-        const titleEl = a.querySelector("h2, h3");
-        return {
-            title:        titleEl ? titleEl.innerText.trim() : "",
-            seller:       sellerM ? sellerM[1].trim() : "",
-            price_eur:    priceM  ? priceM[1].replace(",", ".") : null,
-            delivery_eur: delivM  ? delivM[1].replace(",", ".") : null,
-            seller_url:   links[0] ? links[0].href : ""
-        };
-    });
-}"""
 
 
 async def scrape_ean(page, ean: str) -> list[dict]:
@@ -102,7 +83,7 @@ async def scrape_ean(page, ean: str) -> list[dict]:
         return []
 
     try:
-        raw: list[dict] = await page.evaluate(_EXTRACT_JS)
+        raw: list[dict] = await page.evaluate(EXTRACT_JS)
     except Exception as e:
         log.debug("extraction error for %s: %s", ean, e)
         return []
@@ -152,8 +133,6 @@ async def run(
     input_path: str,
     output_path: str,
     limit: int,
-    concurrency: int,
-    delay: float,
     cdp_url: str,
     resume: bool,
     row_start: int | None = None,
@@ -182,7 +161,7 @@ async def run(
         eans = [e for e in eans if e not in done]
         log.info("Resume: skipping %d already-scraped EANs, %d remaining", before - len(eans), len(eans))
 
-    print(f"Scraping {len(eans)} EANs  concurrency={concurrency}  CDP={cdp_url}")
+    print(f"Scraping {len(eans)} EANs  CDP={cdp_url}")
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,8 +240,6 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="Limit EANs (0 = all)")
     parser.add_argument("--rows", metavar="START-END",
                         help="Excel row range to process, e.g. 2484-4979 (header=row 1, data from row 2)")
-    parser.add_argument("--concurrency", type=int, default=3, help="Parallel browser tabs")
-    parser.add_argument("--delay", type=float, default=3.0, help="Base delay between EANs (s), +0.5–2.5s random")
     parser.add_argument("--cdp", default=_CDP_URL, help="Chrome CDP URL")
     parser.add_argument("--resume", action="store_true", help="Skip already-scraped EANs")
     parser.add_argument("--launch-chrome", action="store_true", help="Launch Chrome automatically")
@@ -270,8 +247,14 @@ def main() -> None:
 
     row_start = row_end = None
     if args.rows:
-        parts = args.rows.split("-")
-        row_start, row_end = int(parts[0]), int(parts[1])
+        try:
+            parts = args.rows.split("-")
+            if len(parts) != 2:
+                raise ValueError
+            row_start, row_end = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            print(f"ERROR: --rows must be START-END (e.g. 2484-4979), got: {args.rows!r}", file=sys.stderr)
+            sys.exit(1)
 
     chrome_proc = None
     if args.launch_chrome:
@@ -284,8 +267,6 @@ def main() -> None:
             input_path=args.input,
             output_path=args.output,
             limit=args.limit,
-            concurrency=args.concurrency,
-            delay=args.delay,
             cdp_url=args.cdp,
             resume=args.resume,
             row_start=row_start,

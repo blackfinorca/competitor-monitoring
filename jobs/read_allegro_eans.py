@@ -31,15 +31,21 @@ def main(xlsx_path: str = _DEFAULT_XLSX, csv_path: str = _DEFAULT_CSV) -> int:
 
     seen: set[str] = set()
     rows: list[dict] = []
-    skipped = 0
+    skipped_none = 0
+    skipped_empty = 0
+    skipped_duplicate = 0
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         raw_ean = row[ean_col]
         if raw_ean is None:
-            skipped += 1
+            skipped_none += 1
             continue
         ean = str(raw_ean).strip().split(".")[0]  # remove .0 from numeric EANs
-        if not ean or ean in seen:
+        if not ean:
+            skipped_empty += 1
+            continue
+        if ean in seen:
+            skipped_duplicate += 1
             continue
         seen.add(ean)
         rows.append({
@@ -56,7 +62,10 @@ def main(xlsx_path: str = _DEFAULT_XLSX, csv_path: str = _DEFAULT_CSV) -> int:
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Wrote {len(rows)} unique EANs to {csv_path}  (skipped {skipped} rows without EAN)")
+    print(
+        f"Wrote {len(rows)} unique EANs to {csv_path}  "
+        f"(skipped: {skipped_none} null, {skipped_empty} empty, {skipped_duplicate} duplicate)"
+    )
     return 0
 
 
