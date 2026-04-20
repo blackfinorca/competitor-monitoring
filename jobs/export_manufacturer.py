@@ -99,12 +99,16 @@ def _load_data(
         return [], {}
 
     tz_ids = [r.id for r in tz_rows]
-    placeholders = ",".join(str(i) for i in tz_ids)
+    tz_params: dict = {f"tz_{i}": v for i, v in enumerate(tz_ids)}
+    tz_placeholders = ", ".join(f":tz_{i}" for i in range(len(tz_ids)))
 
     comp_filter = ""
+    comp_params: dict = {}
     if competitor_ids:
-        quoted = ",".join(f"'{c}'" for c in competitor_ids)
-        comp_filter = f"AND cl.competitor_id IN ({quoted})"
+        cid_params = {f"cid_{i}": v for i, v in enumerate(competitor_ids)}
+        cid_placeholders = ", ".join(f":cid_{i}" for i in range(len(competitor_ids)))
+        comp_filter = f"AND cl.competitor_id IN ({cid_placeholders})"
+        comp_params = cid_params
 
     match_rows = session.execute(
         text(f"""
@@ -119,11 +123,11 @@ def _load_data(
                 lm.confidence
             FROM listing_matches lm
             JOIN competitor_listings cl ON cl.id = lm.competitor_listing_id
-            WHERE lm.toolzone_listing_id IN ({placeholders})
+            WHERE lm.toolzone_listing_id IN ({tz_placeholders})
               AND lm.confidence >= :min_conf
               {comp_filter}
         """),
-        {"min_conf": min_confidence},
+        {"min_conf": min_confidence, **tz_params, **comp_params},
     ).fetchall()
 
     tz_products = [
@@ -132,7 +136,7 @@ def _load_data(
             "ean":        r.ean or "",
             "mpn":        r.mpn or "",
             "title":      r.title or "",
-            "price_eur":  float(r.price_eur) if r.price_eur else None,
+            "price_eur":  float(r.price_eur) if r.price_eur is not None else None,
             "in_stock":   r.in_stock,
             "url":        r.url or "",
             "scraped_at": r.scraped_at,
@@ -147,9 +151,12 @@ def _load_data(
         if tz_id not in matches:
             matches[tz_id] = {}
         existing = matches[tz_id].get(cid)
-        price = float(row.comp_price) if row.comp_price else None
+        price = float(row.comp_price) if row.comp_price is not None else None
         # Keep lowest price when same competitor appears via multiple matches
-        if existing is None or (price and existing["price"] and price < existing["price"]):
+        if existing is None or (
+            price is not None
+            and (existing["price"] is None or price < existing["price"])
+        ):
             matches[tz_id][cid] = {
                 "price":      price,
                 "stock":      row.comp_stock,
@@ -177,7 +184,7 @@ _MATCH_BADGE = {
 
 
 def _diff_pct(tz_price: float | None, comp_price: float | None) -> float | None:
-    if tz_price and comp_price:
+    if tz_price and comp_price is not None:
         return (comp_price - tz_price) / tz_price * 100
     return None
 

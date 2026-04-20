@@ -33,6 +33,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from playwright.async_api import async_playwright
 
@@ -75,7 +76,7 @@ async def scrape_ean(page, ean: str) -> list[dict]:
 
     try:
         await page.goto(
-            f"{_BASE_URL}/vyhladavanie?string={ean}",
+            f"{_BASE_URL}/vyhladavanie?string={quote(ean)}",
             wait_until="domcontentloaded",
             timeout=20_000,
         )
@@ -201,9 +202,12 @@ async def run(
 
         cookie_path = Path(_COOKIE_FILE)
         if cookie_path.exists():
-            saved = json.loads(cookie_path.read_text())
-            await ctx.add_cookies(saved)
-            print(f"Loaded {len(saved)} cookies from {_COOKIE_FILE}")
+            try:
+                saved = json.loads(cookie_path.read_text())
+                await ctx.add_cookies(saved)
+                print(f"Loaded {len(saved)} cookies from {_COOKIE_FILE}")
+            except (json.JSONDecodeError, Exception) as e:
+                log.warning("Could not load cookies from %s: %s", _COOKIE_FILE, e)
 
         print("\nChrome connected. Solve any Cloudflare challenge in the browser window,")
         print("then press Enter to start scraping (or just Enter if cookies restored session)...")
@@ -271,6 +275,8 @@ def main() -> None:
     row_start = row_end = None
     if args.rows:
         parts = args.rows.split("-")
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            parser.error(f"--rows must be START-END with positive integers, got: {args.rows!r}")
         row_start, row_end = int(parts[0]), int(parts[1])
 
     chrome_proc = None
