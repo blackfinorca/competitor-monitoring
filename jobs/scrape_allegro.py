@@ -42,7 +42,7 @@ _DEFAULT_INPUT = "data/allegro_eans.csv"
 _DEFAULT_OUTPUT = "data/allegro_offers.csv"
 _CDP_URL = "http://localhost:9222"
 _BASE_URL = "https://allegro.sk"
-_FIELDNAMES = ["ean", "title", "seller", "seller_url", "price_eur", "delivery_eur", "scraped_at"]
+_FIELDNAMES = ["ean", "title", "seller", "seller_url", "price_eur", "delivery_eur", "box_price_eur", "scraped_at"]
 _COOKIE_FILE = "data/allegro_cookies.json"
 
 # JS to extract all offer articles from the product page
@@ -64,6 +64,44 @@ _EXTRACT_JS = """() => {
             seller_url:   links[0] ? links[0].href : ""
         };
     });
+}"""
+
+# JS to extract the main "box price" — the price shown in the offer conditions
+# panel on the right side of the product page (what the customer sees first).
+_BOX_PRICE_JS = """() => {
+    // 1. structured data (fastest, most reliable)
+    const meta = document.querySelector('meta[itemprop="price"]');
+    if (meta) return meta.getAttribute("content");
+
+    // 2. Allegro's offer/buy box region: look for a section whose text includes
+    //    "Podmienky ponuky" (offer conditions) and grab the first EUR price in it
+    const sections = [...document.querySelectorAll("section, [role='region'], aside")];
+    for (const sec of sections) {
+        const t = sec.innerText || "";
+        if (t.includes("Podmienky ponuky") || t.includes("Kúpiť teraz") || t.includes("Pridať do košíka")) {
+            const m = t.match(/(\\d+[,.]\\d{2})\\s*\\u20ac/);
+            if (m) return m[1].replace(",", ".");
+        }
+    }
+
+    // 3. data-testid price label (Allegro React component)
+    const testid = document.querySelector('[data-testid*="price"] [class*="price"], [data-testid="price-label"]');
+    if (testid) {
+        const m = (testid.innerText || "").match(/(\\d+[,.]\\d{2})/);
+        if (m) return m[1].replace(",", ".");
+    }
+
+    // 4. itemprop offer price in schema.org markup
+    const offerPrice = document.querySelector('[itemprop="offers"] [itemprop="price"]');
+    if (offerPrice) return offerPrice.getAttribute("content") || offerPrice.innerText.trim();
+
+    // 5. fallback: first EUR price that appears in the page before the offers section
+    const offersSection = document.getElementById("inne-oferty-produktu");
+    const pageText = offersSection
+        ? document.body.innerText.slice(0, document.body.innerText.indexOf(offersSection.innerText.slice(0, 20)))
+        : document.body.innerText.slice(0, 3000);
+    const m2 = pageText.match(/(\\d+[,.]\\d{2})\\s*\\u20ac/);
+    return m2 ? m2[1].replace(",", ".") : null;
 }"""
 
 
@@ -107,6 +145,11 @@ async def scrape_ean(page, ean: str) -> list[dict]:
         log.debug("extraction error for %s: %s", ean, e)
         return []
 
+    try:
+        box_price = await page.evaluate(_BOX_PRICE_JS)
+    except Exception:
+        box_price = None
+
     scraped_at = datetime.now(UTC).isoformat()
     offers = [
         {
@@ -116,6 +159,7 @@ async def scrape_ean(page, ean: str) -> list[dict]:
             "seller_url": o["seller_url"],
             "price_eur": o["price_eur"],
             "delivery_eur": o["delivery_eur"],
+            "box_price_eur": box_price,
             "scraped_at": scraped_at,
         }
         for o in raw
@@ -215,6 +259,9 @@ async def run(
         cookie_path.write_text(json.dumps(cookies))
         print(f"Saved {len(cookies)} cookies to {_COOKIE_FILE}")
 
+        # Reuse the existing active tab — new tabs get Cloudflare-blocked
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
         next_long_pause = random.randint(8, 15)
         try:
             for idx, ean in enumerate(eans):
@@ -225,20 +272,16 @@ async def run(
                     await asyncio.sleep(pause)
                     next_long_pause = random.randint(8, 15)
 
-                page = await ctx.new_page()
-                try:
-                    offers = await scrape_ean(page, ean)
-                    if offers:
-                        for o in offers:
-                            writer.writerow(o)
-                        out_file.flush()
-                        total_offers += len(offers)
-                        print(f"[{idx+1}/{len(eans)}] {ean}  → {len(offers)} offers")
-                    else:
-                        not_found += 1
-                        print(f"[{idx+1}/{len(eans)}] {ean}  → not found")
-                finally:
-                    await page.close()
+                offers = await scrape_ean(page, ean)
+                if offers:
+                    for o in offers:
+                        writer.writerow(o)
+                    out_file.flush()
+                    total_offers += len(offers)
+                    print(f"[{idx+1}/{len(eans)}] {ean}  → {len(offers)} offers")
+                else:
+                    not_found += 1
+                    print(f"[{idx+1}/{len(eans)}] {ean}  → not found")
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\nInterrupted — saving progress.")
 
@@ -249,7 +292,30 @@ async def run(
 
     out_file.close()
     print(f"\nDone. {total_offers} offers from {len(eans) - not_found}/{len(eans)} EANs.")
+
+    # Auto-update the wide Excel after every scrape
+    _rebuild_wide_excel(output_path)
     return 0
+
+
+def _rebuild_wide_excel(offers_csv: str) -> None:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from export_allegro_offers import main as export_main
+        wide_path = "data/allegro_offers_wide.xlsx"
+        print(f"\nRebuilding {wide_path} …")
+        export_main(
+            input_path=offers_csv,
+            output_path=wide_path,
+            ref_path="item-analysis/Allegro zalistované položky 42026.xlsx",
+            ref_sheet="export(1)",
+            ref_ean_col="products_ean",
+            ref_price_col="price",
+            ref_label="KUTILOVO Price",
+        )
+    except Exception as e:
+        print(f"Warning: could not rebuild wide Excel: {e}")
 
 
 def main() -> None:
