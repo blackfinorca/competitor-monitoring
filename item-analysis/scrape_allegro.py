@@ -38,12 +38,12 @@ from playwright.async_api import async_playwright
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_INPUT = "data/allegro_eans.csv"
-_DEFAULT_OUTPUT = "data/allegro_offers.csv"
+_DEFAULT_INPUT = "item-analysis/allegro_eans.csv"
+_DEFAULT_OUTPUT = "item-analysis/allegro_offers.csv"
 _CDP_URL = "http://localhost:9222"
 _BASE_URL = "https://allegro.sk"
 _FIELDNAMES = ["ean", "title", "seller", "seller_url", "price_eur", "delivery_eur", "box_price_eur", "scraped_at"]
-_COOKIE_FILE = "data/allegro_cookies.json"
+_COOKIE_FILE = "item-analysis/allegro_cookies.json"
 
 # JS to extract all offer articles from the product page
 _EXTRACT_JS = """() => {
@@ -303,7 +303,7 @@ def _rebuild_wide_excel(offers_csv: str) -> None:
     _sys.path.insert(0, str(Path(__file__).parent))
     try:
         from export_allegro_offers import main as export_main
-        wide_path = "data/allegro_offers_wide.xlsx"
+        wide_path = "item-analysis/allegro_offers_wide.xlsx"
         print(f"\nRebuilding {wide_path} …")
         export_main(
             input_path=offers_csv,

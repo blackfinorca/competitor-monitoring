@@ -390,7 +390,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="data/allegro_offers.csv")
+    parser.add_argument("--input", default="item-analysis/allegro_offers.csv")
     parser.add_argument("--output", default=None)
     parser.add_argument("--reference", dest="ref_path", default=None,
                         help="CSV or Excel file with reference prices (e.g. KUTILOVO price list)")

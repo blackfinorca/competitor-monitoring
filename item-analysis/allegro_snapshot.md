@@ -1,0 +1,348 @@
+- generic [ref=e1]:
+  - img
+  - generic [ref=e2]:
+    - banner [ref=e4]:
+      - generic [ref=e6]:
+        - link "Allegro — pohodlné a bezpečné online nakupovanie s najširším výberom ponúk" [ref=e8] [cursor=pointer]:
+          - /url: /
+          - img "Allegro — pohodlné a bezpečné online nakupovanie s najširším výberom ponúk" [ref=e9]
+        - generic [ref=e12]:
+          - combobox "Čo hľadáte?" [ref=e13]
+          - link "Hľadať podľa obrázka" [ref=e15] [cursor=pointer]:
+            - /url: /hladat/podla-obrazka
+          - generic [ref=e17]:
+            - generic [ref=e18]: Nitovače
+            - combobox "Kategórie a možnosti vyhľadávania" [ref=e20] [cursor=pointer]:
+              - option "Nitovače" [selected]
+              - option "Všetky kategórie"
+              - option "Cenové hity"
+              - option "Dom a záhrada"
+              - option "Deti"
+              - option "Elektronika"
+              - option "Obchod a služby"
+              - option "Zbierky a umenie"
+              - option "Kultúra a zábava"
+              - option "Móda"
+              - option "Auto-moto"
+              - option "Šport a cestovanie"
+              - option "Supermarket"
+              - option "Krása"
+              - option "Zdravie"
+              - option "Predajcovia"
+          - button "hľadať" [ref=e21] [cursor=pointer]:
+            - generic [ref=e22]: hľadať
+        - navigation [ref=e23]:
+          - link "Prejsť na Moje zásielky" [ref=e24] [cursor=pointer]:
+            - /url: /moje-allegro/nakupy/moje-zasielky
+          - link "Prejsť do Obľúbených." [ref=e26] [cursor=pointer]:
+            - /url: /moje-allegro/nakupy/oblubene
+          - button "Rozbaliť menu so správami" [ref=e29] [cursor=pointer]
+          - generic "Rozbaliť menu s upozorneniami" [ref=e31]:
+            - button [ref=e32] [cursor=pointer]
+          - 'link "Cart, number of items: 0" [ref=e39] [cursor=pointer]':
+            - /url: /kosik
+            - 'button "Cart, number of items: 0" [ref=e40]':
+              - img [ref=e42]
+          - button "Rozbaliť menu Moje Allegro" [ref=e44] [cursor=pointer]
+      - generic [ref=e47]:
+        - button "Kategórie" [ref=e49] [cursor=pointer]: Kategórie
+        - list [ref=e66]:
+          - listitem [ref=e67]:
+            - link "Cenové hity" [ref=e68] [cursor=pointer]:
+              - /url: https://allegro.sk/cenovehity/
+          - listitem [ref=e69]:
+            - link "MALL" [ref=e70] [cursor=pointer]:
+              - /url: https://allegro.sk/obchod/MALLShop-sk
+          - listitem [ref=e71]:
+            - link "CZC" [ref=e72] [cursor=pointer]:
+              - /url: https://allegro.sk/obchod/czc-sk
+          - listitem [ref=e73]:
+            - link "Allegro bezpečný nákup" [ref=e74] [cursor=pointer]:
+              - /url: https://allegro.sk/pre-kupujucich/allegro-bezpecny-nakup
+        - list [ref=e78]:
+          - listitem [ref=e79]:
+            - link "buďte Smart" [ref=e81] [cursor=pointer]:
+              - /url: /smart
+              - text: buďte
+              - img "Smart" [ref=e82]
+    - link "Pozri porovnanie" [ref=e85] [cursor=pointer]:
+      - /url: /porovnanie
+    - main [ref=e86]:
+      - generic [ref=e88]:
+        - navigation [ref=e93]:
+          - list [ref=e94]:
+            - text: ‎
+            - listitem [ref=e95]:
+              - link "Allegro" [ref=e96] [cursor=pointer]:
+                - /url: https://allegro.sk
+                - generic [ref=e97]: Allegro
+              - text: /
+            - listitem [ref=e98]:
+              - link "Auto-moto" [ref=e99] [cursor=pointer]:
+                - /url: https://allegro.sk/odporucame/auto-moto
+                - generic [ref=e100]: Auto-moto
+              - text: /
+            - listitem [ref=e101]:
+              - link "Dielenské náradie a vybavenie" [ref=e102] [cursor=pointer]:
+                - /url: https://allegro.sk/kategoria/dielenske-naradie-a-vybavenie-18554
+                - generic [ref=e103]: Dielenské náradie a vybavenie
+              - text: /
+            - listitem [ref=e104]:
+              - link "Karosárske a lakovnícke práce" [ref=e105] [cursor=pointer]:
+                - /url: https://allegro.sk/kategoria/dielenske-naradie-a-vybavenie-karosarske-a-lakovnicke-prace-259534
+                - generic [ref=e106]: Karosárske a lakovnícke práce
+              - text: /
+            - listitem [ref=e107]:
+              - link "Nitovače" [ref=e108] [cursor=pointer]:
+                - /url: https://allegro.sk/kategoria/karosarske-a-lakovnicke-prace-nitovace-322051
+                - generic [ref=e109]: Nitovače
+            - text: ‎
+        - generic [ref=e115]:
+          - generic [ref=e117]:
+            - generic [ref=e123]:
+              - generic [ref=e126]:
+                - generic [ref=e127]
+                - generic [ref=e146]
+              - generic [ref=e163]:
+                - generic [ref=e165] [cursor=pointer]
+                - generic [ref=e183] [cursor=pointer]
+            - generic [ref=e212]:
+              - heading "Zobraziť podobné ponuky" [level=2] [ref=e213]
+              - generic [ref=e218]:
+                - text: Sponzorované
+                - button "Pozrite si podrobnosti týkajúce sa reklám" [ref=e219] [cursor=pointer]
+              - generic [ref=e227]:
+                - generic [ref=e230]
+                - generic [ref=e251]
+                - generic [ref=e272]
+                - generic [ref=e293]
+                - generic [ref=e314]
+                - generic [ref=e335]
+                - generic [ref=e356]
+                - generic [ref=e377]
+                - generic [ref=e398]
+                - generic [ref=e421]
+                - generic [ref=e442]
+                - generic [ref=e460]
+                - generic [ref=e481]
+                - generic [ref=e502]
+            - generic [ref=e577]:
+              - generic [ref=e580]:
+                - heading "Objednajte si balík ponúk v jednej zásielke" [level=2] [ref=e581]
+                - generic [ref=e586]
+              - generic [ref=e617]:
+                - heading "Parametre" [level=2] [ref=e618]
+                - table [ref=e624]
+              - generic [ref=e660]:
+                - heading "Opis" [level=2] [ref=e661]
+                - generic [ref=e664]
+            - generic [ref=e712]:
+              - heading "Recenzie produktu" [level=2] [ref=e713]
+              - generic [ref=e721]:
+                - generic [ref=e722]
+                - separator [ref=e789]
+                - generic [ref=e790]
+            - link "Čo si myslíte o tejto stránke? Zhodnoťte, ako sú informácie o tejto ponuke prezentované. Odpovedzte na zopár otázok v prieskume." [ref=e798] [cursor=pointer]:
+              - /url: "#ankieta"
+              - img [ref=e800]
+              - generic [ref=e801]:
+                - generic [ref=e802]: Čo si myslíte o tejto stránke?
+                - generic [ref=e803]: Zhodnoťte, ako sú informácie o tejto ponuke prezentované. Odpovedzte na zopár otázok v prieskume.
+              - img [ref=e805]
+          - generic [ref=e807]:
+            - region "Podmienky ponuky Možnosti nákupu" [ref=e817]:
+              - heading "Podmienky ponuky" [level=2] [ref=e818]
+              - generic [ref=e819]:
+                - generic [ref=e821]
+                - generic [ref=e823]
+              - separator [ref=e831]
+              - region "Možnosti nákupu" [ref=e832]:
+                - heading "Možnosti nákupu" [level=2] [ref=e833]
+                - generic [ref=e834]
+              - generic [ref=e853]:
+                - button "Odhadované doručenie Informácie v utorok za 2,59 € alebo za 0 € ak si aktivujete Smart!" [ref=e854] [cursor=pointer]
+                - button "Vrátenie tovaru zadarmo – 14 dní Allegro bezpečný nákup | Reklamácia" [ref=e882] [cursor=pointer]
+                - button "Spôsoby platby Plaťte tak, ako vám to vyhovuje" [ref=e888] [cursor=pointer]
+              - generic [ref=e894]:
+                - img "Allegro Protect" [ref=e896]
+                - generic [ref=e897]
+            - complementary "Tento produkt od iných predajcov" [ref=e904]:
+              - generic [ref=e905]:
+                - heading "Tento produkt od iných predajcov" [level=2] [ref=e907]
+                - generic [ref=e911]: "Produkt: Nitovacie kliešte MAT HOBBY"
+              - generic [ref=e912]:
+                - 'link "NAJLACNEJŠIE Stav: nové 4,73 €" [ref=e913] [cursor=pointer]':
+                  - /url: "#inne-oferty-produktu"
+                - separator [ref=e923]
+                - link "NAJRÝCHLEJŠIE doručenie v utorok 4,73 €" [ref=e924] [cursor=pointer]:
+                  - /url: "#inne-oferty-produktu"
+              - link "Všetky ponuky (5)" [ref=e935] [cursor=pointer]:
+                - /url: "#inne-oferty-produktu"
+            - complementary "Informácie o predajcovi" [ref=e940]:
+              - heading "Informácie o predajcovi" [level=2] [ref=e941]
+              - generic [ref=e942]:
+                - link "Informácie o predajcovi KUTILOVO" [ref=e943] [cursor=pointer]:
+                  - /url: "#about-seller"
+                - heading "Predaj a odoslanie" [level=6] [ref=e947]
+                - generic [ref=e950]: KUTILOVO
+                - generic [ref=e951]
+              - separator [ref=e957]
+              - list [ref=e959]:
+                - listitem [ref=e960]
+                - listitem [ref=e963]
+                - listitem [ref=e968]
+        - heading "Ostatní zákazníci si tiež prezreli" [level=2] [ref=e1013]
+        - generic [ref=e1045]:
+          - 'heading "Ďalšie od: MAT" [level=2] [ref=e1046]'
+          - generic [ref=e1051]:
+            - text: Sponzorované
+            - button "Pozrite si podrobnosti týkajúce sa reklám" [ref=e1052] [cursor=pointer]:
+              - img [ref=e1054]
+          - generic [ref=e1060]:
+            - generic [ref=e1063]:
+              - img "Kľúč otvorený FESTA CrV 16x17mm" [ref=e1066]
+              - list [ref=e1068]:
+                - listitem [ref=e1069]
+                - listitem [ref=e1073]
+                - listitem [ref=e1075]
+                - listitem [ref=e1079]
+            - generic [ref=e1084]:
+              - img "Kefa rotačná koncová vlnitá FESTA 17mm stopka" [ref=e1087]
+              - list [ref=e1089]:
+                - listitem [ref=e1090]
+                - listitem [ref=e1094]
+                - listitem [ref=e1096]
+                - listitem [ref=e1100]
+            - generic [ref=e1105]:
+              - img "Kľúč otvorený FESTA 6x7mm DIN 895" [ref=e1108]
+              - list [ref=e1110]:
+                - listitem [ref=e1111]
+                - listitem [ref=e1115]
+                - listitem [ref=e1117]
+                - listitem [ref=e1121]
+            - generic [ref=e1126]:
+              - img "Korunka vykružovacia FESTA karbidová 73mm" [ref=e1129]
+              - list [ref=e1131]:
+                - listitem [ref=e1132]
+                - listitem [ref=e1136]
+                - listitem [ref=e1138]
+                - listitem [ref=e1142]
+            - generic [ref=e1147]:
+              - img "Kefa rotačné koncový copy FESTA 19mm stopka" [ref=e1150]
+              - list [ref=e1152]:
+                - listitem [ref=e1153]
+                - listitem [ref=e1157]
+                - listitem [ref=e1159]
+                - listitem [ref=e1163]
+            - generic [ref=e1168]:
+              - img "Pás náraďový kožený 6 vreciek" [ref=e1171]
+              - list [ref=e1173]:
+                - listitem [ref=e1174]
+                - listitem [ref=e1178]
+                - listitem [ref=e1180]
+                - listitem [ref=e1184]
+        - heading "Objednajte v jednej zásielke" [level=2] [ref=e1228]
+        - heading "Nedávno zobrazené" [level=2] [ref=e1257]
+        - paragraph [ref=e1317]:
+          - generic [ref=e1318]:
+            - text: Niektoré texty boli preložené automaticky.
+            - link "Dajte nám vedieť, ak si všimnete jazykovú chybu." [ref=e1319] [cursor=pointer]:
+              - /url: "#linguistic-error"
+        - generic [ref=e1326]:
+          - generic [ref=e1328]: "Číslo ponuky: 18113486654"
+          - generic [ref=e1329]:
+            - generic [ref=e1330]:
+              - button "Nahláste ponuku nesprávne prepojenú s produktom" [ref=e1331] [cursor=pointer]
+              - generic [ref=e1332]:
+                - text: ⁠
+                - img "Informácia" [ref=e1336]
+            - link "Nahláste porušenie pravidiel" [ref=e1337] [cursor=pointer]:
+              - /url: /nahlasit-porusenie/ponuka/18113486654
+    - dialog [ref=e1342]:
+      - generic [ref=e1343]:
+        - generic [ref=e1344]:
+          - generic [ref=e1345]:
+            - heading "Ďalšie ponuky s týmto produktom" [level=3] [ref=e1346]
+            - button "Zatvoriť" [active] [ref=e1347] [cursor=pointer]
+          - generic [ref=e1357]:
+            - img "Nitovacie kliešte MAT HOBBY - miniatúra" [ref=e1359]
+            - generic [ref=e1360]:
+              - heading "Nitovacie kliešte MAT HOBBY" [level=2] [ref=e1361]
+              - paragraph [ref=e1362]: (5 ponúk)
+        - separator [ref=e1363]
+      - generic [ref=e1368]:
+        - generic [ref=e1435]:
+          - generic [ref=e1436]:
+            - radiogroup [ref=e1437]:
+              - generic [ref=e1438]:
+                - radio "Všetko" [checked] [ref=e1439]
+                - generic [ref=e1440] [cursor=pointer]: Všetko
+              - generic [ref=e1441]:
+                - radio "Najlacnejšie" [ref=e1442]
+                - generic [ref=e1443] [cursor=pointer]: Najlacnejšie
+              - generic [ref=e1444]:
+                - radio "Najrýchlejšie" [ref=e1445]
+                - generic [ref=e1446] [cursor=pointer]: Najrýchlejšie
+              - img "doplňujúce informácie" [ref=e1449]
+            - generic [ref=e1452]:
+              - button "Stav" [ref=e1453] [cursor=pointer]: Vyberte
+              - generic [ref=e1454]: Stav
+          - generic [ref=e1456]:
+            - text: Zoznam ponúk prepojených s produktom.
+            - link "Viac informácií" [ref=e1457] [cursor=pointer]:
+              - /url: /pomoc/pre-kupujucich/vyhladavanie-a-oblubene/zoradenie-produktov-zl0xLEK6jFP#zoradenie-v-sekcii-al-ie-ponuky-s-tymto-produktom
+        - generic [ref=e1463]:
+          - list [ref=e1467]:
+            - listitem [ref=e1468]:
+              - article [ref=e1469]:
+                - generic [ref=e1472]
+                - generic [ref=e1478]
+            - listitem [ref=e1530]:
+              - generic [ref=e1531]:
+                - generic [ref=e1535]: Záruka najnižšej ceny
+                - generic [ref=e1536]
+                - link "Zobraziť podrobnosti" [ref=e1543] [cursor=pointer]:
+                  - /url: https://allegro.sk/kampan/zaruka-ceny#o-programie-sk
+            - listitem [ref=e1544]:
+              - heading "Ponuky" [level=2] [ref=e1545]
+            - listitem [ref=e1546]:
+              - article [ref=e1547]:
+                - generic [ref=e1752]
+            - listitem [ref=e1595]:
+              - article [ref=e1596]:
+                - generic [ref=e1800]
+            - listitem [ref=e1644]:
+              - article [ref=e1645]:
+                - generic [ref=e1848]
+            - listitem [ref=e1693]:
+              - article [ref=e1694]:
+                - generic [ref=e1896]
+          - navigation "stránkovanie" [ref=e1748]:
+            - spinbutton "zadajte stranu, na ktorú chcete prejsť" [ref=e1749]: "1"
+            - generic [ref=e1750]: z
+            - link "prejsť na stranu 1" [ref=e1751] [cursor=pointer]:
+              - /url: https://allegro.sk/produkt/nitovacie-klieste-mat-hobby-e49c03f0-0526-46eb-b176-d3e6a693f363?offerId=18113486654#productlisting-container
+              - text: "1"
+      - button "šípka nahor" [ref=e1382] [cursor=pointer]:
+        - img "šípka nahor" [ref=e1383]
+    - generic [ref=e1391]:
+      - img "Allegro" [ref=e1400]
+      - generic [ref=e1403]:
+        - paragraph [ref=e1406]: Portály skupiny Allegro
+        - generic [ref=e1408]:
+          - list [ref=e1412]:
+            - listitem [ref=e1413]:
+              - link "Allegro.pl" [ref=e1414] [cursor=pointer]:
+                - /url: https://allegro.pl/
+          - list [ref=e1418]:
+            - listitem [ref=e1419]:
+              - link "Allegro.cz" [ref=e1420] [cursor=pointer]:
+                - /url: https://allegro.cz/
+          - list [ref=e1424]:
+            - listitem [ref=e1425]:
+              - link "Allegro.hu" [ref=e1426] [cursor=pointer]:
+                - /url: https://allegro.hu/
+          - list [ref=e1430]:
+            - listitem [ref=e1431]:
+              - link "Onedelivery.cz" [ref=e1432] [cursor=pointer]:
+                - /url: https://onedelivery.cz/

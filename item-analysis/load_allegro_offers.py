@@ -38,7 +38,7 @@ def _parse_dt(value: str | None):
         return None
 
 
-def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> int:
+def main(input_path: str = "item-analysis/allegro_offers.csv", dry_run: bool = False) -> int:
     path = Path(input_path)
     if not path.exists():
         print(f"ERROR: {input_path} not found", file=sys.stderr)
@@ -122,7 +122,7 @@ def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="data/allegro_offers.csv")
+    parser.add_argument("--input", default="item-analysis/allegro_offers.csv")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     sys.exit(main(args.input, args.dry_run))

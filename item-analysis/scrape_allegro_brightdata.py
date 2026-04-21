@@ -31,8 +31,8 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_INPUT = "data/allegro_eans.csv"
-_DEFAULT_OUTPUT = "data/allegro_offers.csv"
+_DEFAULT_INPUT = "item-analysis/allegro_eans.csv"
+_DEFAULT_OUTPUT = "item-analysis/allegro_offers.csv"
 _BASE_URL = "https://allegro.sk"
 _FIELDNAMES = ["ean", "title", "seller", "seller_url", "price_eur", "delivery_eur", "scraped_at"]
 
