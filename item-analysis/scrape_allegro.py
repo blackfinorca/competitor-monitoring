@@ -30,6 +30,7 @@ import csv
 import json
 import logging
 import random
+import re
 import subprocess
 import sys
 import time
@@ -130,12 +131,25 @@ _BOX_PRICE_JS = """() => {
 }"""
 
 
-async def scrape_ean(page, ean: str) -> list[dict]:
-    # 4–7s pause before each scrape (simulates reading/thinking)
-    pre = random.uniform(4.0, 7.0)
-    print(f"  pre-scrape {pre:.1f}s", flush=True)
-    await asyncio.sleep(pre)
+def _looks_like_all_offers_label(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text).strip().casefold()
+    return "všetky" in normalized and "ponuky" in normalized
 
+
+async def _click_all_offers_control(page) -> bool:
+    controls = page.locator("button, a")
+    count = await controls.count()
+    for idx in range(count):
+        control = controls.nth(idx)
+        text = await control.inner_text()
+        if not _looks_like_all_offers_label(text):
+            continue
+        await control.click()
+        return True
+    return False
+
+
+async def scrape_ean(page, ean: str) -> list[dict]:
     try:
         await page.goto(
             f"{_BASE_URL}/vyhladavanie?string={ean}",
@@ -191,14 +205,10 @@ async def scrape_ean(page, ean: str) -> list[dict]:
     try:
         await page.goto(product_url, wait_until="domcontentloaded", timeout=20_000)
 
-        # Click "Všetky ponuky" / "všetky ponuky" button to expand the full offer list
+        # Click only the "Všetky ponuky" control, not other "Všetky ..." sections.
         try:
-            btn = await page.query_selector(
-                'button:has-text("ponuky"), a:has-text("ponuky"), '
-                'button:has-text("Všetky"), a:has-text("Všetky")'
-            )
-            if btn:
-                await btn.click()
+            clicked = await _click_all_offers_control(page)
+            if clicked:
                 await asyncio.sleep(1.5)
         except Exception:
             pass
@@ -239,12 +249,53 @@ async def scrape_ean(page, ean: str) -> list[dict]:
         if o.get("seller")
     ]
 
-    # 2–5s pause after scrape
-    post = random.uniform(2.0, 5.0)
-    print(f"  post-scrape {post:.1f}s", flush=True)
-    await asyncio.sleep(post)
-
     return offers
+
+
+class _TurnController:
+    def __init__(self, worker_ids: list[int]) -> None:
+        self.worker_ids = worker_ids
+        self.active_workers = set(worker_ids)
+        self.current_turn = worker_ids[0]
+        self._events = {worker_id: asyncio.Event() for worker_id in worker_ids}
+        self._events[self.current_turn].set()
+
+    async def wait_for_turn(self, worker_id: int) -> None:
+        await self._events[worker_id].wait()
+
+    def handoff(self, worker_id: int) -> None:
+        if worker_id not in self.active_workers or self.current_turn != worker_id:
+            return
+        next_worker = self._next_active_worker_after(worker_id)
+        if next_worker is None:
+            return
+        self._events[worker_id].clear()
+        self.current_turn = next_worker
+        self._events[next_worker].set()
+
+    def mark_inactive(self, worker_id: int) -> None:
+        if worker_id not in self.active_workers:
+            return
+        self.active_workers.remove(worker_id)
+        self._events[worker_id].clear()
+        if not self.active_workers:
+            return
+        if self.current_turn == worker_id:
+            next_worker = self._next_active_worker_after(worker_id)
+            if next_worker is not None:
+                self.current_turn = next_worker
+                self._events[next_worker].set()
+
+    def _next_active_worker_after(self, worker_id: int) -> int | None:
+        if not self.active_workers:
+            return None
+        start_idx = self.worker_ids.index(worker_id)
+        total = len(self.worker_ids)
+        for offset in range(1, total + 1):
+            candidate = self.worker_ids[(start_idx + offset) % total]
+            if candidate in self.active_workers:
+                return candidate
+        return None
 
 
 async def _worker(
@@ -252,23 +303,23 @@ async def _worker(
     page,
     queue: asyncio.Queue,
     writer: "csv.DictWriter",
+    out_file,
     write_lock: asyncio.Lock,
     counters: dict,
     total: int,
+    output_path: str,
+    started_at: float,
+    turn_controller: _TurnController,
 ) -> None:
     next_long_pause = random.randint(8, 15)
     idx = 0
     while True:
+        await turn_controller.wait_for_turn(worker_id)
         try:
             ean = queue.get_nowait()
         except asyncio.QueueEmpty:
+            turn_controller.mark_inactive(worker_id)
             break
-
-        if idx > 0 and idx % next_long_pause == 0:
-            pause = random.uniform(20.0, 30.0)
-            print(f"[W{worker_id}] long pause {pause:.1f}s", flush=True)
-            await asyncio.sleep(pause)
-            next_long_pause = random.randint(8, 15)
 
         offers = await scrape_ean(page, ean)
 
@@ -276,9 +327,9 @@ async def _worker(
             done = counters["done"] + 1
             counters["done"] = done
             if offers:
-                for o in offers:
-                    writer.writerow(o)
+                _persist_offers_batch(offers, writer, out_file, output_path)
                 counters["total"] += len(offers)
+                counters["scraped_eans"] += 1
                 print(f"[W{worker_id}] [{done}/{total}] {ean}  → {len(offers)} offers", flush=True)
             else:
                 counters["not_found"] += 1
@@ -286,6 +337,22 @@ async def _worker(
 
         queue.task_done()
         idx += 1
+        turn_controller.handoff(worker_id)
+
+        post = random.uniform(2.0, 5.0)
+        print(f"[W{worker_id}] rest {post:.1f}s", flush=True)
+        await asyncio.sleep(post)
+
+        if idx > 0 and idx % next_long_pause == 0:
+            pause = random.uniform(20.0, 30.0)
+            elapsed_seconds = time.monotonic() - started_at
+            print(
+                f"[W{worker_id}] {_format_progress_snapshot(counters=counters, total=total, elapsed_seconds=elapsed_seconds)}",
+                flush=True,
+            )
+            print(f"[W{worker_id}] long pause {pause:.1f}s", flush=True)
+            await asyncio.sleep(pause)
+            next_long_pause = random.randint(8, 15)
 
 
 def _launch_chrome(port: int) -> subprocess.Popen:
@@ -317,6 +384,73 @@ def _parse_cdp_urls(cdp_arg: str) -> list[str]:
         else:
             urls.append(f"http://localhost:{part}")
     return urls
+
+
+def _persist_offers_batch(
+    offers: list[dict],
+    writer: "csv.DictWriter",
+    out_file,
+    output_path: str,
+    rebuild_excel=None,
+) -> None:
+    if rebuild_excel is None:
+        rebuild_excel = _rebuild_wide_excel
+    for offer in offers:
+        writer.writerow(offer)
+    out_file.flush()
+    rebuild_excel(output_path)
+
+
+def _filter_eans_for_existing_output(
+    eans: list[str],
+    existing_rows: list[dict[str, str]],
+    *,
+    resume: bool,
+    skip_found: bool,
+) -> list[str]:
+    remaining = eans
+
+    if resume:
+        done = {row["ean"] for row in existing_rows}
+        remaining = [ean for ean in remaining if ean not in done]
+
+    if skip_found:
+        found = {row["ean"] for row in existing_rows if row.get("seller")}
+        remaining = [ean for ean in remaining if ean not in found]
+
+    return remaining
+
+
+def _should_append_output(*, resume: bool, skip_found: bool, output_exists: bool) -> bool:
+    return output_exists and (resume or skip_found)
+
+
+def _format_mmss(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    minutes, secs = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_progress_snapshot(*, counters: dict, total: int, elapsed_seconds: float) -> str:
+    done = counters["done"]
+    scraped_eans = counters["scraped_eans"]
+    not_found = counters["not_found"]
+    missing = max(total - done, 0)
+
+    if done > 0 and elapsed_seconds > 0:
+        rate = done / elapsed_seconds
+        eta = _format_mmss(missing / rate) if rate > 0 else "--:--"
+    else:
+        eta = "--:--"
+
+    return (
+        f"progress: scraped={scraped_eans} "
+        f"not_found={not_found} missing={missing} "
+        f"elapsed={_format_mmss(elapsed_seconds)} eta={eta}"
+    )
 
 
 async def run(
@@ -352,19 +486,20 @@ async def run(
         eans = eans[:limit]
 
     # Resume: skip EANs already in output (any row = skip)
-    if resume and Path(output_path).exists():
+    output_exists = Path(output_path).exists()
+    existing_rows: list[dict[str, str]] = []
+    if output_exists and (resume or skip_found):
         with open(output_path, newline="", encoding="utf-8") as f:
-            done = {r["ean"] for r in csv.DictReader(f)}
+            existing_rows = list(csv.DictReader(f))
+
+    if resume:
         before = len(eans)
-        eans = [e for e in eans if e not in done]
+        eans = _filter_eans_for_existing_output(eans, existing_rows, resume=True, skip_found=False)
         print(f"--resume: skipping {before - len(eans)} already-scraped EANs, {len(eans)} remaining")
 
-    # Skip-found: skip only EANs that already have ≥1 offer (retry "not found" ones)
-    if skip_found and Path(output_path).exists():
-        with open(output_path, newline="", encoding="utf-8") as f:
-            found = {r["ean"] for r in csv.DictReader(f) if r.get("seller")}
+    if skip_found:
         before = len(eans)
-        eans = [e for e in eans if e not in found]
+        eans = _filter_eans_for_existing_output(eans, existing_rows, resume=False, skip_found=True)
         print(f"--skip-found: skipping {before - len(eans)} EANs with existing offers, {len(eans)} remaining")
 
     cdp_urls = _parse_cdp_urls(cdp_url)
@@ -373,13 +508,14 @@ async def run(
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    append = resume and out_path.exists()
+    append = _should_append_output(resume=resume, skip_found=skip_found, output_exists=out_path.exists())
     out_file = open(output_path, "a" if append else "w", newline="", encoding="utf-8")
     writer = csv.DictWriter(out_file, fieldnames=_FIELDNAMES)
     if not append:
         writer.writeheader()
 
     cookie_path = Path(_COOKIE_FILE)
+    started_at = time.monotonic()
 
     async with async_playwright() as pw:
         # Connect to each Chrome and load cookies
@@ -414,11 +550,24 @@ async def run(
             queue.put_nowait(ean)
 
         write_lock = asyncio.Lock()
-        counters = {"total": 0, "not_found": 0, "done": 0}
+        counters = {"total": 0, "not_found": 0, "done": 0, "scraped_eans": 0}
+        turn_controller = _TurnController(list(range(n_workers)))
 
         tasks = [
             asyncio.create_task(
-                _worker(i, pages[i], queue, writer, write_lock, counters, len(eans))
+                _worker(
+                    i,
+                    pages[i],
+                    queue,
+                    writer,
+                    out_file,
+                    write_lock,
+                    counters,
+                    len(eans),
+                    output_path,
+                    started_at,
+                    turn_controller,
+                )
             )
             for i in range(n_workers)
         ]
