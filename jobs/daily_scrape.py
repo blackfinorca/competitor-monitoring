@@ -10,14 +10,16 @@ Strategy per competitor (from live inspection):
   - rebiop_sk         → search-by-MPN fallback (custom HTML parser; /search/products?q=)
   - strend_sk         → discover_feed first; search-by-MPN fallback (WooCommerce HTML)
   - boukal_cz         → discover_feed first (Heureka/Zboží XML); JS-rendered fallback
-  - ferant_sk         → skipped (DNS fails as of 2026-04)
+  - fermatshop_sk     → sitemap full-catalogue crawl (fermatshop.sk)
 """
 
 import logging
+import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from types import FrameType
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -28,6 +30,7 @@ from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
 from agnaradie_pricing.scrapers.bo_import import BoImportScraper
 from agnaradie_pricing.scrapers.boukal import BoukalScraper
 from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
+from agnaradie_pricing.scrapers.ferant import FermatshopScraper
 from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
 from agnaradie_pricing.scrapers.persistence import save_competitor_listings
 from agnaradie_pricing.scrapers.rebiop import RebiopScraper
@@ -53,6 +56,7 @@ SEARCH_COMPETITORS = {
     "naradieshop_sk": NaradieShopScraper,
     "toolzone_sk": ToolZoneScraper,
     "rebiop_sk": RebiopScraper,
+    "fermatshop_sk": FermatshopScraper,
     "boukal_cz": BoukalScraper,
     "bo_import_cz": BoImportScraper,
     "agi_sk": AgiScraper,
@@ -60,8 +64,8 @@ SEARCH_COMPETITORS = {
 
 
 # Flush scraped listings to the DB after this many are buffered.
-# Smaller = more frequent commits (more durable); larger = fewer DB round-trips.
-_SAVE_BATCH_SIZE = 200
+# Smaller batches make interrupted runs more durable and visible in the dashboard sooner.
+_SAVE_BATCH_SIZE = 50
 
 
 def build_scraper(config: dict):
@@ -72,14 +76,53 @@ def build_scraper(config: dict):
     return ShoptetGenericScraper(config)
 
 
+def _flush_buffer(buffer: list, factory, cid: str, saved: int) -> tuple[list, int]:
+    if not buffer:
+        return buffer, saved
+    with factory() as session:
+        save_competitor_listings(session, buffer)
+        session.commit()
+    saved += len(buffer)
+    with _log_lock:
+        logger.info("  %s: flushed %d listings (%d total so far)", cid, len(buffer), saved)
+    return [], saved
+
+
+def _install_shutdown_handlers(stop_event: threading.Event):
+    previous_handlers = {}
+
+    def _handle_shutdown(signum: int, frame: FrameType | None) -> None:
+        if stop_event.is_set():
+            raise KeyboardInterrupt
+        stop_event.set()
+        with _log_lock:
+            logger.warning(
+                "Shutdown requested (%s) — stopping after current item and flushing buffered listings",
+                signal.Signals(signum).name,
+            )
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[sig] = signal.getsignal(sig)
+        signal.signal(sig, _handle_shutdown)
+
+    def _restore() -> None:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+
+    return _restore
+
+
 def _scrape_one(
     comp_config: dict,
     catalogue: list[dict],
     factory,
+    stop_event: threading.Event | None = None,
+    save_batch_size: int = _SAVE_BATCH_SIZE,
 ) -> tuple[str, int]:
     """Scrape one competitor and save to DB in batches. Thread-safe."""
     cid = comp_config["id"]
     scraper = build_scraper(comp_config)
+    stop_event = stop_event or threading.Event()
 
     def _log(msg, *args):
         with _log_lock:
@@ -89,30 +132,22 @@ def _scrape_one(
     saved, buffer = 0, []
     try:
         for listing in scraper.run_daily_iter(catalogue):
+            if stop_event.is_set():
+                _log("  %s: stop requested; flushing %d buffered listings", cid, len(buffer))
+                break
             buffer.append(listing)
-            if len(buffer) >= _SAVE_BATCH_SIZE:
-                with factory() as session:
-                    save_competitor_listings(session, buffer)
-                    session.commit()
-                saved += len(buffer)
-                _log("  %s: flushed %d listings (%d total so far)", cid, len(buffer), saved)
-                buffer.clear()
+            if len(buffer) >= save_batch_size:
+                buffer, saved = _flush_buffer(buffer, factory, cid, saved)
     except BaseException:
         with _log_lock:
             logger.exception("Error/interrupt scraping %s after %d saved — flushing partial batch", cid, saved)
         raise
     finally:
-        if buffer:
-            try:
-                with factory() as session:
-                    save_competitor_listings(session, buffer)
-                    session.commit()
-                saved += len(buffer)
-                _log("  %s: flushed final %d listings (%d total)", cid, len(buffer), saved)
-                buffer.clear()
-            except Exception:
-                with _log_lock:
-                    logger.exception("  %s: failed to flush final batch", cid)
+        try:
+            buffer, saved = _flush_buffer(buffer, factory, cid, saved)
+        except Exception:
+            with _log_lock:
+                logger.exception("  %s: failed to flush final batch", cid)
 
     _log("Saved %d listings for %s", saved, cid)
     return cid, saved
@@ -122,7 +157,10 @@ def main(
     catalogue_path: Path = Path("data/ag_catalogue.csv"),
     only: list[str] | None = None,
     sequential: bool = False,
+    stop_event: threading.Event | None = None,
+    save_batch_size: int = _SAVE_BATCH_SIZE,
 ) -> dict[str, int]:
+    stop_event = stop_event or threading.Event()
     settings = Settings()
     competitors = load_competitors()
     catalogue = [
@@ -150,22 +188,49 @@ def main(
 
     if sequential or len(active) <= 1:
         for comp_config in active:
-            cid, n = _scrape_one(comp_config, catalogue, factory)
+            if stop_event.is_set():
+                logger.warning("Stop requested before starting next scraper")
+                break
+            cid, n = _scrape_one(
+                comp_config,
+                catalogue,
+                factory,
+                stop_event=stop_event,
+                save_batch_size=save_batch_size,
+            )
             counts[cid] = n
     else:
         with ThreadPoolExecutor(max_workers=len(active)) as pool:
             futures = {
-                pool.submit(_scrape_one, c, catalogue, factory): c["id"]
+                pool.submit(
+                    _scrape_one,
+                    c,
+                    catalogue,
+                    factory,
+                    stop_event,
+                    save_batch_size,
+                ): c["id"]
                 for c in active
             }
-            for future in as_completed(futures):
-                try:
-                    cid, n = future.result()
-                    counts[cid] = n
-                except Exception:
-                    cid = futures[future]
-                    logger.exception("Competitor %s raised an unhandled exception", cid)
-                    counts[cid] = 0
+            try:
+                for future in as_completed(futures):
+                    try:
+                        cid, n = future.result()
+                        counts[cid] = n
+                    except Exception:
+                        cid = futures[future]
+                        logger.exception("Competitor %s raised an unhandled exception", cid)
+                        counts[cid] = 0
+            except KeyboardInterrupt:
+                stop_event.set()
+                logger.warning("Interrupted — waiting for scraper buffers to flush")
+                for future, cid in futures.items():
+                    try:
+                        result_cid, n = future.result()
+                        counts[result_cid] = n
+                    except Exception:
+                        logger.exception("Competitor %s failed while shutting down", cid)
+                        counts[cid] = 0
 
     return counts
 
@@ -210,17 +275,27 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    if args.manufacturer:
-        # Manufacturer mode — delegate to manufacturer_scrape.main()
-        import manufacturer_scrape
-        result = manufacturer_scrape.main(
-            manufacturer_slug=args.manufacturer,
-            brand_name=args.brand_name,
-            only=set(args.only) if args.only else None,
-            sequential=args.sequential,
-        )
-    else:
-        result = main(catalogue_path=args.catalogue, only=args.only, sequential=args.sequential)
+    stop_event = threading.Event()
+    restore_handlers = _install_shutdown_handlers(stop_event)
+    try:
+        if args.manufacturer:
+            # Manufacturer mode — delegate to manufacturer_scrape.main()
+            import manufacturer_scrape
+            result = manufacturer_scrape.main(
+                manufacturer_slug=args.manufacturer,
+                brand_name=args.brand_name,
+                only=set(args.only) if args.only else None,
+                sequential=args.sequential,
+            )
+        else:
+            result = main(
+                catalogue_path=args.catalogue,
+                only=args.only,
+                sequential=args.sequential,
+                stop_event=stop_event,
+            )
+    finally:
+        restore_handlers()
 
     for cid, n in result.items():
         print(f"  {cid}: {n} listings")

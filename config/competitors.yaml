@@ -29,11 +29,11 @@ competitors:
     weight: 1.0
     rate_limit_rps: 1   # XML feed download
     workers: 1
-  - id: ferant_sk
-    name: Ferant
-    url: https://www.ferant.sk
+  - id: fermatshop_sk
+    name: Fermatshop
+    url: https://www.fermatshop.sk
     weight: 1.0
-    rate_limit_rps: 1   # DNS fails — skipped
+    rate_limit_rps: 1   # sitemap + detail pages (full catalogue crawl)
     workers: 1
   - id: rebiop_sk
     name: Rebiop
@@ -72,4 +72,3 @@ competitors:
     rate_limit_rps: 4   # per worker; 16 workers → ~64 req/s (our own store)
     workers: 16
     own_store: true  # owned by AG Naradie — exclude from competitor benchmarks
-
