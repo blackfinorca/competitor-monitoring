@@ -52,6 +52,7 @@ from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
 from agnaradie_pricing.scrapers.ferant import FermatshopScraper
 from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
 from agnaradie_pricing.scrapers.rebiop import RebiopScraper
+from agnaradie_pricing.scrapers.strend import StrendproScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors, own_store_ids
 
@@ -88,6 +89,8 @@ def _competitor_names() -> dict[str, str]:
         # Keep old DB rows readable after competitor-id rename.
         if "fermatshop_sk" in names:
             names.setdefault("ferant_sk", names["fermatshop_sk"])
+        if "strendpro_sk" in names:
+            names.setdefault("strend_sk", names["strendpro_sk"])
         return names
     except Exception:
         return {}
@@ -113,6 +116,7 @@ def _get_competitor_scrapers() -> dict:
         "rebiop_sk": RebiopScraper,
         "boukal_cz": BoukalScraper,
         "fermatshop_sk": FermatshopScraper,
+        "strendpro_sk": StrendproScraper,
     }
     scrapers = {}
     for cid, cls in registry.items():
@@ -911,7 +915,7 @@ abbreviations (e.g. `knipex` = `KNIPEX`).
 | BO-Import (CZ) | Manufacturer-page crawl | Authorized KNIPEX distributor CZ; JSON-LD; CZK→EUR |
 | AGI (SK) | Manufacturer-page crawl | rshop platform; JSON-LD; EAN via gtin; EUR prices |
 | Fermatshop | Sitemap crawl | Full catalogue via `/sitemap.xml` |
-| Strend | — | WordPress content site only; skipped |
+| Strendpro | Full catalogue crawl | Category + pagination crawl on `strendpro.sk` |
 """)
 
 

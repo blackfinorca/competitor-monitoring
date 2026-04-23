@@ -41,11 +41,11 @@ competitors:
     weight: 1.0
     rate_limit_rps: 1   # per worker; 3 workers → ~3 req/s total
     workers: 3
-  - id: strend_sk
-    name: Strend
-    url: https://www.strend.sk
+  - id: strendpro_sk
+    name: Strendpro
+    url: https://www.strendpro.sk
     weight: 1.0
-    rate_limit_rps: 1   # content site only — skipped
+    rate_limit_rps: 1   # full catalogue crawl via category + pagination
     workers: 1
   - id: boukal_cz
     name: Boukal

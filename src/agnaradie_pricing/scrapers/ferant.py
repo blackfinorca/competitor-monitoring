@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -21,6 +22,8 @@ import httpx
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
 from agnaradie_pricing.scrapers.http import make_client, polite_get
 from agnaradie_pricing.scrapers.inspection import HEUREKA_FEED_PATHS
+
+logger = logging.getLogger(__name__)
 
 
 FERMATSHOP_CONFIG = {
@@ -124,8 +127,12 @@ def _extract_product_urls_from_sitemap(client: httpx.Client) -> list[str]:
 def _scrape_product_page(
     client: httpx.Client, url: str, competitor_id: str, min_rps: float
 ) -> CompetitorListing | None:
-    response = polite_get(client, url, min_rps=min_rps, referer="https://www.fermatshop.sk/")
-    response.raise_for_status()
+    try:
+        response = polite_get(client, url, min_rps=min_rps, referer="https://www.fermatshop.sk/")
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning("fermatshop_sk: skipping %s due to HTTP error: %s", url, exc)
+        return None
     parsed = _parse_product_detail(response.text)
     if parsed is None:
         return None

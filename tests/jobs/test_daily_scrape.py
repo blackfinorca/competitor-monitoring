@@ -72,6 +72,16 @@ class StoppingScraper:
         yield _listing(3)
 
 
+class InterruptingScraper:
+    def __init__(self, config: dict) -> None:
+        self.config = config
+
+    def run_daily_iter(self, catalogue: list[dict]):
+        yield _listing(1)
+        yield _listing(2)
+        raise KeyboardInterrupt
+
+
 def test_scrape_one_flushes_in_batches_and_final_partial(monkeypatch) -> None:
     daily_scrape = _load_daily_scrape_module()
     calls: list[list[CompetitorListing]] = []
@@ -121,6 +131,31 @@ def test_scrape_one_flushes_partial_batch_when_stop_requested(monkeypatch) -> No
     assert [len(batch) for batch in calls] == [2]
 
 
+def test_scrape_one_flushes_buffer_when_interrupted(monkeypatch) -> None:
+    daily_scrape = _load_daily_scrape_module()
+    calls: list[list[CompetitorListing]] = []
+    monkeypatch.setattr(daily_scrape, "build_scraper", lambda config: InterruptingScraper(config))
+    monkeypatch.setattr(
+        daily_scrape,
+        "save_competitor_listings",
+        lambda session, listings: calls.append(list(listings)),
+    )
+
+    try:
+        daily_scrape._scrape_one(
+            {"id": "example_sk"},
+            catalogue=[],
+            factory=FakeFactory(calls),
+            save_batch_size=50,  # keep all listings in memory to test final flush
+        )
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("Expected KeyboardInterrupt to propagate")
+
+    assert [len(batch) for batch in calls] == [2]
+
+
 def test_main_only_runs_requested_competitor(monkeypatch) -> None:
     daily_scrape = _load_daily_scrape_module()
 
@@ -130,7 +165,7 @@ def test_main_only_runs_requested_competitor(monkeypatch) -> None:
         lambda: [
             {"id": "fermatshop_sk", "name": "Fermatshop"},
             {"id": "agi_sk", "name": "AGI"},
-            {"id": "strend_sk", "name": "Strend"},
+            {"id": "strendpro_sk", "name": "Strendpro"},
         ],
     )
     monkeypatch.setattr(

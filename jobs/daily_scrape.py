@@ -8,7 +8,7 @@ Strategy per competitor (from live inspection):
   - naradieshop_sk    → search-by-MPN fallback (ThirtyBees HTML parser)
   - toolzone_sk       → sitemap-based full-catalogue scrape (JSON-LD per page)
   - rebiop_sk         → search-by-MPN fallback (custom HTML parser; /search/products?q=)
-  - strend_sk         → discover_feed first; search-by-MPN fallback (WooCommerce HTML)
+  - strendpro_sk      → category + pagination full-catalogue crawl (strendpro.sk)
   - boukal_cz         → discover_feed first (Heureka/Zboží XML); JS-rendered fallback
   - fermatshop_sk     → sitemap full-catalogue crawl (fermatshop.sk)
 """
@@ -35,6 +35,7 @@ from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
 from agnaradie_pricing.scrapers.persistence import save_competitor_listings
 from agnaradie_pricing.scrapers.rebiop import RebiopScraper
 from agnaradie_pricing.scrapers.shoptet_generic import ShoptetGenericScraper
+from agnaradie_pricing.scrapers.strend import StrendproScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors
 
@@ -48,14 +49,14 @@ FEED_COMPETITORS = {
     "centrumnaradia_sk",
 }
 
-# Competitors that need search-by-MPN fallback — custom subclasses registered here.
-# strend_sk is excluded: site has no product catalogue (WordPress content site only).
+# Competitors with dedicated crawler/fallback implementations.
 SEARCH_COMPETITORS = {
     "doktorkladivo_sk": DoktorKladivoScraper,
     "ahprofi_sk": AhProfiScraper,
     "naradieshop_sk": NaradieShopScraper,
     "toolzone_sk": ToolZoneScraper,
     "rebiop_sk": RebiopScraper,
+    "strendpro_sk": StrendproScraper,
     "fermatshop_sk": FermatshopScraper,
     "boukal_cz": BoukalScraper,
     "bo_import_cz": BoImportScraper,
@@ -257,7 +258,7 @@ if __name__ == "__main__":
         "--only",
         nargs="+",
         metavar="COMPETITOR_ID",
-        help="Scrape only these competitor IDs (e.g. --only strend_sk boukal_cz)",
+        help="Scrape only these competitor IDs (e.g. --only strendpro_sk boukal_cz)",
     )
     parser.add_argument(
         "--catalogue",

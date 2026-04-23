@@ -1,7 +1,9 @@
 from agnaradie_pricing.scrapers.ferant import (
     _extract_product_urls_from_sitemap,
     _parse_product_detail,
+    _scrape_product_page,
 )
+import httpx
 
 
 _DETAIL_HTML = """
@@ -60,3 +62,21 @@ def test_extract_product_urls_from_sitemap_filters_non_products(monkeypatch) -> 
         "https://www.fermatshop.sk/akumulatorove-naradie/product-a/",
         "https://www.fermatshop.sk/aku-vrtacky/product-b/",
     ]
+
+
+def test_scrape_product_page_returns_none_on_http_error(monkeypatch) -> None:
+    from agnaradie_pricing.scrapers import ferant
+
+    def _raise(*args, **kwargs):
+        del args, kwargs
+        raise httpx.ConnectError("dns failed")
+
+    monkeypatch.setattr(ferant, "polite_get", _raise)
+
+    listing = _scrape_product_page(
+        client=object(),  # type: ignore[arg-type]
+        url="https://www.fermatshop.sk/akumulatorove-naradie/product-a/",
+        competitor_id="fermatshop_sk",
+        min_rps=1.0,
+    )
+    assert listing is None
