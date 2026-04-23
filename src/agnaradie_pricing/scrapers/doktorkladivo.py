@@ -17,7 +17,7 @@ run_daily():
          - Availability: "availability":"https://schema.org/InStock"
 
 search_by_mpn():
-    Fallback used by daily_match.py live searches — GET /hladat/?q={brand}+{mpn},
+    Fallback used by matching jobs — GET /hladat/?q={brand}+{mpn},
     parse first JSON-LD Product result from the search page.
 
 ~10,000 products in the catalogue as of 2026-04.

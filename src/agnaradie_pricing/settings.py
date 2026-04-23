@@ -26,7 +26,7 @@ except ModuleNotFoundError:
             data.setdefault("database_url", os.getenv("DATABASE_URL"))
             data.setdefault("anthropic_api_key", os.getenv("ANTHROPIC_API_KEY"))
             data.setdefault("openai_api_key", os.getenv("OPENAI_API_KEY") or None)
-            data.setdefault("openai_model", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+            data.setdefault("openai_model", os.getenv("OPENAI_MODEL", "gpt-5-nano"))
             data.setdefault("log_level", os.getenv("LOG_LEVEL", "INFO"))
             data.setdefault("alert_webhook_url", os.getenv("ALERT_WEBHOOK_URL") or None)
             super().__init__(**data)
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     database_url: str = Field(default="postgresql+psycopg://user:pass@localhost:5432/agnaradie")
     anthropic_api_key: str | None = Field(default=None)
     openai_api_key: str | None = Field(default=None)
-    openai_model: str = Field(default="gpt-4o-mini")
+    openai_model: str = Field(default="gpt-5-nano")
     log_level: str = Field(default="INFO")
     alert_webhook_url: str | None = Field(default=None)
 
@@ -76,4 +76,3 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
     return data
-

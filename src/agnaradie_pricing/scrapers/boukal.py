@@ -16,7 +16,7 @@ Strategy
    c. Open every product page and extract EAN, Katalog (MPN), E-shop SKU,
       price, availability, brand, title.
    d. Emit a CompetitorListing for every product found — matching against the
-      AG catalogue is handled downstream by daily_match.py.
+      AG catalogue is handled downstream by match_products.py.
    e. Stop pagination once the last page is reached.
 
 3. search_by_mpn / search_by_query: paginate the brand page, open product

@@ -1,4 +1,5 @@
 from agnaradie_pricing.matching.deterministic import match_deterministic
+from agnaradie_pricing.matching.llm_matcher import OpenAIClient
 
 
 def test_match_deterministic_prefers_ean_match() -> None:
@@ -25,3 +26,6 @@ def test_match_deterministic_returns_none_when_identifiers_differ() -> None:
 
     assert match_deterministic(product, listing) is None
 
+
+def test_openai_client_defaults_to_gpt_5_nano() -> None:
+    assert OpenAIClient(api_key="test").model == "gpt-5-nano"

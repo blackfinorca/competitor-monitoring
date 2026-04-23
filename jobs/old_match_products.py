@@ -1,32 +1,8 @@
-"""Standalone product-matching job.
+"""Legacy product-matching job.
 
-Matches ToolZone reference listings against all other competitor listings and
-saves results to the `listing_matches` table.  Optionally runs the full scrape
-pipeline first so the whole flow is a single command.
-
-Matching layers (in order, first hit wins):
-  1. exact_ean   — EAN identical on both sides                 confidence 1.00
-  2. llm_fuzzy   — vector top-20 + OpenAI verification (opt-in) confidence 0.75–0.84
-
-Examples
---------
-    # Scrape + EAN match + LLM + report (full pipeline)
-    python jobs/match_products.py --manufacturer knipex --scrape --llm
-
-    # EAN match only (no scrape, no LLM)
-    python jobs/match_products.py --manufacturer knipex
-
-    # EAN + LLM fallback (already scraped)
-    python jobs/match_products.py --manufacturer knipex --llm
-
-    # Restrict to specific competitors
-    python jobs/match_products.py --manufacturer knipex --only boukal_cz bo_import_cz --llm
-
-    # Re-match from scratch
-    python jobs/match_products.py --manufacturer knipex --force --llm
-
-    # All manufacturers in DB
-    python jobs/match_products.py --llm
+This is the pre-vector version of match_products.py. It keeps the same flags
+and database output, but its LLM step uses the original brand/title-token
+pre-filter before asking OpenAI to verify a match.
 """
 
 import logging
@@ -41,37 +17,34 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from agnaradie_pricing.db.models import ListingMatch
 from agnaradie_pricing.db.session import make_session_factory
-from agnaradie_pricing.matching.llm_matcher import OpenAIClient, find_best_llm_match
-from agnaradie_pricing.matching.vector_search import TitleVectorIndex
+from agnaradie_pricing.matching.llm_matcher import (
+    OpenAIClient,
+    find_best_llm_match,
+    pre_filter_candidates,
+)
 from agnaradie_pricing.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 _MIN_LLM_CONFIDENCE = 0.75
-_LLM_CANDIDATE_LIMIT = 20
 
-# Competitor display names for the report
 _DISPLAY_NAMES = {
-    "bo_import_cz":        "BO-Import",
-    "boukal_cz":           "Boukal",
-    "madmat_sk":           "MadMat",
-    "centrumnaradia_sk":   "CentrumNáradia",
-    "doktorkladivo_sk":    "DoktorKladivo",
-    "ahprofi_sk":          "AhProfi",
-    "naradieshop_sk":      "NaradieShop",
-    "rebiop_sk":           "Rebiop",
-    "agi_sk":              "AGI",
-    "toolzone_sk":         "ToolZone",
+    "bo_import_cz": "BO-Import",
+    "boukal_cz": "Boukal",
+    "madmat_sk": "MadMat",
+    "centrumnaradia_sk": "CentrumNáradia",
+    "doktorkladivo_sk": "DoktorKladivo",
+    "ahprofi_sk": "AhProfi",
+    "naradieshop_sk": "NaradieShop",
+    "rebiop_sk": "Rebiop",
+    "agi_sk": "AGI",
+    "toolzone_sk": "ToolZone",
 }
 
 
 def _disp(cid: str) -> str:
     return _DISPLAY_NAMES.get(cid, cid)
 
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
 
 def _load_toolzone_listings(session, manufacturer: str | None) -> list[dict]:
     if manufacturer:
@@ -122,9 +95,7 @@ def _load_competitor_listings(session, manufacturer: str | None, only: list[str]
 
 
 def _already_matched_ids(session) -> set[int]:
-    rows = session.execute(
-        text("SELECT competitor_listing_id FROM listing_matches")
-    ).fetchall()
+    rows = session.execute(text("SELECT competitor_listing_id FROM listing_matches")).fetchall()
     return {r[0] for r in rows}
 
 
@@ -139,10 +110,6 @@ def _save_matches(session, matches: list[dict]) -> int:
     session.commit()
     return result.rowcount or 0
 
-
-# ---------------------------------------------------------------------------
-# Matching logic
-# ---------------------------------------------------------------------------
 
 def _ean_match(
     toolzone_listings: list[dict],
@@ -184,16 +151,16 @@ def _llm_match(
     *,
     already_matched: set[int],
 ) -> int:
-    """Run LLM matching, print each hit to stdout, and save immediately. Returns total saved."""
+    """Run legacy LLM matching using brand/title-token pre-filter candidates."""
     saved = 0
-    pending = [cl for cl in unmatched if cl["id"] not in already_matched]
-    total = len(pending)
-    candidate_index = TitleVectorIndex(toolzone_listings)
+    total = len([cl for cl in unmatched if cl["id"] not in already_matched])
+    done = 0
 
-    for done, (cl, candidates) in enumerate(
-        zip(pending, candidate_index.search_many(pending, limit=_LLM_CANDIDATE_LIMIT)),
-        start=1,
-    ):
+    for cl in unmatched:
+        if cl["id"] in already_matched:
+            continue
+        done += 1
+        candidates = pre_filter_candidates(cl, toolzone_listings)
         if not candidates:
             print(f"  [{done}/{total}] {cl['competitor_id']}  no candidates — skip")
             continue
@@ -223,13 +190,7 @@ def _llm_match(
     return saved
 
 
-# ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
-
 def _print_report(factory, manufacturer: str | None) -> None:
-    """Print a price-comparison table for all ToolZone products that have at
-    least one competitor match, grouped by product."""
     with factory() as session:
         rows = session.execute(
             text("""
@@ -259,8 +220,8 @@ def _print_report(factory, manufacturer: str | None) -> None:
         print("No matches found.")
         return
 
-    # Group by ToolZone product
     from collections import defaultdict
+
     products: dict[int, dict] = {}
     comp_prices: dict[int, list[dict]] = defaultdict(list)
 
@@ -280,14 +241,12 @@ def _print_report(factory, manufacturer: str | None) -> None:
             "match_type": r.match_type,
         })
 
-    # Collect all competitor IDs that appear
     all_competitors = sorted({
         c["competitor_id"]
         for comps in comp_prices.values()
         for c in comps
     })
 
-    # Header
     col_w = 14
     title_w = 52
     header = f"{'Product':<{title_w}}  {'EAN':<14}  {'TZ €':>7}  " + \
@@ -314,7 +273,6 @@ def _print_report(factory, manufacturer: str | None) -> None:
         ean_str = (prod["ean"] or "")[:14]
         tz_str = f"{tz_price:.2f}" if tz_price else "—"
 
-        # Build per-competitor cells
         comp_map: dict[str, dict] = {c["competitor_id"]: c for c in comp_prices[tz_id]}
         cells = []
         for cid in all_competitors:
@@ -347,10 +305,6 @@ def _print_report(factory, manufacturer: str | None) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main(
     manufacturer: str | None = None,
     use_llm: bool = False,
@@ -359,25 +313,13 @@ def main(
     scrape: bool = False,
     report: bool = True,
 ) -> dict:
-    """Run optional scrape → match → report pipeline.
-
-    Args:
-        manufacturer: Brand name filter (e.g. 'knipex'). None = all.
-        use_llm:      Enable LLM fallback for EAN-unmatched listings.
-        only:         Restrict to these competitor IDs.
-        force:        Re-match listings that already have a match record.
-        scrape:       Run manufacturer scraping step before matching.
-        report:       Print price-comparison table after matching.
-    """
     settings = Settings()
     factory = make_session_factory(settings)
 
-    # Ensure listing_matches table exists
     from agnaradie_pricing.db.models import Base
     from agnaradie_pricing.db.session import make_engine
     Base.metadata.create_all(make_engine(settings))
 
-    # --- Step 0: optional scrape ---
     if scrape:
         if not manufacturer:
             logger.error("--scrape requires --manufacturer (cannot scrape all brands at once)")
@@ -391,7 +333,6 @@ def main(
         )
         logger.info("Scrape complete: %s", scrape_counts)
 
-    # --- Step 1: load data ---
     with factory() as session:
         logger.info("Loading ToolZone reference listings (manufacturer=%s) …", manufacturer or "all")
         toolzone = _load_toolzone_listings(session, manufacturer)
@@ -408,7 +349,6 @@ def main(
         logger.warning("No ToolZone listings found — nothing to match against.")
         return {"ean_matches": 0, "llm_matches": 0, "total_saved": 0}
 
-    # --- Step 2: EAN matching ---
     logger.info("=== Step 1: EAN matching ===")
     ean_records, unmatched = _ean_match(toolzone, competitors, already_matched)
     logger.info("  EAN matches: %d  |  unmatched: %d", len(ean_records), len(unmatched))
@@ -419,7 +359,6 @@ def main(
 
     llm_saved = 0
 
-    # --- Step 3: LLM matching (optional) ---
     if use_llm and unmatched:
         api_key = settings.openai_api_key
         if not api_key:
@@ -429,7 +368,11 @@ def main(
             logger.error("OPENAI_API_KEY not set — skipping LLM matching.")
         else:
             model = settings.openai_model
-            logger.info("=== Step 2: LLM matching (%s) for %d listings ===", model, len(unmatched))
+            logger.info(
+                "=== Step 2: Legacy LLM matching (%s) for %d listings ===",
+                model,
+                len(unmatched),
+            )
             llm_client = OpenAIClient(api_key=api_key, model=model)
             with factory() as session:
                 already_matched_updated = _already_matched_ids(session)
@@ -441,7 +384,6 @@ def main(
 
     total_saved = ean_saved + llm_saved
 
-    # --- Step 4: match summary ---
     with factory() as session:
         summary_rows = session.execute(
             text("""
@@ -464,7 +406,6 @@ def main(
         total_c = sum(types.values())
         logger.info("  %-28s  total: %4d  (%s)", _disp(cid), total_c, parts)
 
-    # --- Step 5: price-comparison report ---
     if report:
         _print_report(factory, manufacturer)
 
@@ -479,14 +420,14 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Scrape → match → report pipeline for a manufacturer.",
+        description="Legacy scrape → match → report pipeline for a manufacturer.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python jobs/match_products.py --manufacturer knipex --scrape --llm
-  python jobs/match_products.py --manufacturer knipex --llm
-  python jobs/match_products.py --manufacturer knipex --only boukal_cz bo_import_cz
-  python jobs/match_products.py --manufacturer knipex --force
+  python jobs/old_match_products.py --manufacturer knipex --scrape --llm
+  python jobs/old_match_products.py --manufacturer knipex --llm
+  python jobs/old_match_products.py --manufacturer knipex --only boukal_cz bo_import_cz
+  python jobs/old_match_products.py --manufacturer knipex --force
         """,
     )
     parser.add_argument(
@@ -503,7 +444,7 @@ Examples:
     parser.add_argument(
         "--llm",
         action="store_true",
-        help="Enable LLM fallback for listings without an EAN match.",
+        help="Enable legacy LLM fallback for listings without an EAN match.",
     )
     parser.add_argument(
         "--only",

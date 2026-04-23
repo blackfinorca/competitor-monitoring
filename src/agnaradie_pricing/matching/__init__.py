@@ -16,8 +16,8 @@ Single usage
     result = match_product(product, listing)                          # layers 1–5
     result = match_product(product, listing, llm_client=Anthropic())  # + layer 6
 
-Bulk LLM usage (daily_match.py)
---------------------------------
+Bulk LLM usage
+--------------
     from agnaradie_pricing.matching import match_product_bulk
 
     matches = match_product_bulk(unmatched, all_products, llm_client=client)

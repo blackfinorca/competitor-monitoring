@@ -136,7 +136,7 @@ def _get_llm_client():
             pass
     if not api_key:
         return None
-    model = os.environ.get("OPENAI_MODEL", "o4-mini")
+    model = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
     try:
         s = _get_settings()
         model = getattr(s, "openai_model", model) or model
@@ -764,7 +764,7 @@ def _render_coverage_tab() -> None:
         ).fetchall()
 
         # Count distinct matched competitor listings from listing_matches
-        # (the table written by match_products.py / daily_match.py new pipeline)
+        # (the table written by match_products.py)
         match_counts = session.execute(
             text("""
                 SELECT cl.competitor_id,
@@ -883,11 +883,10 @@ order — the first layer that fires wins. Higher confidence = stronger evidence
 | 4 | `regex_ean_title` | EAN-13 extracted from listing title matches | **0.93** |
 | 5 | `regex_mpn_title` | MPN extracted from title + brand agrees | **0.90** |
 | 6 | `regex_mpn_no_brand` | MPN extracted from title; brand absent or mismatched | **0.72–0.78** |
-| 7 *(opt-in)* | `llm_fuzzy` | gpt-4o-mini title/spec similarity after pre-filter | **0.75–0.84** |
+| 7 *(opt-in)* | `llm_fuzzy` | gpt-5-nano title/spec similarity after vector retrieval | **0.75–0.84** |
 
-**LLM pre-filter** (layer 7): before calling the API, candidates are narrowed to
-≤ 5 products that share the same brand (or have no brand) **and** have ≥ 2 meaningful
-title words in common. This avoids wasting API quota on clearly unrelated products.
+**LLM candidate retrieval** (layer 7): before calling the API, local vector search narrows each listing to
+up to 20 ToolZone products. The LLM then verifies the best match from that candidate set.
 
 **Normalisation**: MPN comparison strips spaces, dashes, and lowercases both sides
 (e.g. `87-01-250` = `8701250`). Brand comparison collapses accents and common

@@ -27,7 +27,7 @@ alembic upgrade head
 │ competitors │    │ ToolZone    │    │ actions     │    │ items        │
 └─────────────┘    └─────────────┘    └─────────────┘    └──────────────┘
   daily_scrape       match_products     daily_recommend     daily_alert
-  manufacturer_      daily_match
+  manufacturer_
   scrape
 ```
 
@@ -123,7 +123,7 @@ Layer  Type                Trigger                              Confidence
   4    regex_ean_title     EAN-13 extracted from title            0.93
   5    regex_mpn_title     MPN from title + brand agrees          0.90
   6    regex_mpn_no_brand  MPN from title, brand absent           0.72–0.78
-  7*   llm_fuzzy           gpt-4o-mini title/spec similarity      0.75–0.84
+  7*   llm_fuzzy           gpt-5-nano verifies vector candidates  0.75–0.84
        * opt-in via --llm flag, requires OPENAI_API_KEY
 ```
 
@@ -200,13 +200,6 @@ python jobs/daily_recommend.py                       # no flags
 ### `daily_alert.py` — Send Slack alerts
 ```bash
 python jobs/daily_alert.py                           # silent if ALERT_WEBHOOK_URL not set
-```
-
-### `daily_match.py` — Batch match (legacy)
-```bash
-python jobs/daily_match.py                           # deterministic layers only
-python jobs/daily_match.py --llm                     # + LLM layer
-python jobs/daily_match.py --llm --min-confidence 0.80
 ```
 
 ### `export_manufacturer.py` — Export manufacturer comparison to Excel

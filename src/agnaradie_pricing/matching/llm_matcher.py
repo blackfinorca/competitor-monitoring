@@ -1,20 +1,17 @@
-"""LLM-based fuzzy product matching — layer 3 after exact and regex.
+"""LLM-based fuzzy product matching.
 
 Strategy
 --------
-Only runs when layers 1 & 2 (exact EAN/MPN and regex title extraction) both
-fail.  Before calling the API we do a cheap pre-filter to build a short
-candidate list:
+Only runs when exact EAN matching fails.  The production matcher first narrows
+ToolZone products with local vector search, then passes a short candidate list
+to this verifier.
 
-  1. Brand agreement  — both brands present and equal (normalised),
-                        OR at least one side has no brand (unknown).
-  2. Title token overlap ≥ 2 — at least 2 meaningful words in common after
-                        stop-word removal.  Eliminates clearly unrelated products.
-
-We then call the LLM once per unmatched listing, passing the listing + up to
+The older token pre-filter remains available for smaller in-process matching
+calls; it requires brand compatibility and at least two shared title tokens.
+Both paths call the LLM once per unmatched listing, passing the listing + up to
 MAX_CANDIDATES candidates, and ask it to return the best match as JSON.
 
-Default backend: OpenAI (gpt-4o-mini or any compatible model).
+Default backend: OpenAI (gpt-5-nano or any compatible model).
 The client is model-agnostic — anything that implements LLMClient works.
 
 Confidence tiers
@@ -28,7 +25,7 @@ Usage
     from agnaradie_pricing.matching.llm_matcher import OpenAIClient
     from agnaradie_pricing.matching import match_product
 
-    client = OpenAIClient(api_key="sk-...", model="gpt-4o-mini")
+    client = OpenAIClient(api_key="sk-...", model="gpt-5-nano")
     result = match_product(product, listing, llm_client=client)
 """
 
@@ -52,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-_MAX_CANDIDATES = 5          # products sent to LLM per listing
+_MAX_CANDIDATES = 20         # products sent to LLM per listing
 _MIN_CONFIDENCE = 0.75       # discard weaker LLM hits
 _MIN_TOKEN_OVERLAP = 2       # pre-filter: minimum shared meaningful words
 _STOP_WORDS = frozenset(
@@ -165,7 +162,7 @@ class LLMClient(Protocol):
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
 
-_DEFAULT_MODEL = "gpt-4o-mini"
+_DEFAULT_MODEL = "gpt-5-nano"
 
 
 class OpenAIClient:
