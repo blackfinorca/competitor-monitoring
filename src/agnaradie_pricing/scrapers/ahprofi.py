@@ -1,35 +1,40 @@
 """AH Profi scraper.
 
 AH Profi (ahprofi.sk) is a custom Slovak platform with no Heureka feed.
-Product data is present in static HTML on the search results page.
+Category listing pages are JS-rendered; product detail pages have full
+microdata in static HTML.
 
-Search URL : /vysledky-vyhladavania?search_keyword={brand}+{mpn}
-Structure  : <div class="item col col-special bg-white relative" itemprop="itemListElement">
-               <span class="user_code" title="Kód produktu">{mpn}</span>
-               <a href="{relative_url}" itemprop="url">
-                 <span itemprop="name">{title}</span>
-               </a>
-               <span class="final-price row top">
-                 <strong class="..."><span class="price">€ {price}</span></strong>
-               </span>
-               <span class="availability"><span class="green">Skladom</span></span>
-             </div>
+Strategy
+--------
+run_daily_iter() — full catalogue crawl via sitemap:
+    1. Fetch /sitemap (XML index) to discover sitemap page count.
+    2. Fetch each /sitemap?products=true&page=N to get ~1 000 product URLs.
+       (~11 pages × 1 000 = ~11 000 products total)
+    3. Fetch each product URL and parse microdata fields.
+    Parallel fetching via get_thread_client() + parallel_map().
 
-Note: MPN is stored in user_code and maps to the manufacturer part number.
-      No EAN is exposed in search results.
+search_by_mpn(brand, mpn):
+    1. Normalise MPN by stripping all separators: "87-01-250" → "8701250"
+    2. GET /vysledky-vyhladavania?search_keyword={normalised_mpn}
+    3. If the server redirects to a product page, parse it directly.
+    4. If still on search results, no exact match → return None.
+
+Product page data (microdata / og tags in static HTML):
+    og:title              → title  (strip " | ahprofi.sk" suffix)
+    itemprop="productID"  → competitor_sku / mpn
+    itemprop="gtin13"     → ean
+    itemprop="price" content="N.NN"  → price_eur
+    itemprop="availability" href="…" → in_stock
 """
 
 import re
 from datetime import UTC, datetime
-from html import unescape
-from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import httpx
 
 from agnaradie_pricing.scrapers.base import CompetitorListing, CompetitorScraper
-from agnaradie_pricing.scrapers.detail import enrich_from_detail_page
-from agnaradie_pricing.scrapers.http import make_client, polite_get
+from agnaradie_pricing.scrapers.http import get_thread_client, make_client, parallel_map, polite_get
 
 
 AHPROFI_CONFIG = {
@@ -38,9 +43,15 @@ AHPROFI_CONFIG = {
     "url": "https://www.ahprofi.sk",
     "weight": 1.0,
     "rate_limit_rps": 1,
+    "workers": 4,
     "search_path": "vysledky-vyhladavania",
     "search_query_param": "search_keyword",
 }
+
+_SEARCH_PAGE_MARKER = "vysledky-vyhladavania"
+_SITEMAP_URL = "https://www.ahprofi.sk/sitemap"
+_SITEMAP_PAGE_RE = re.compile(r'sitemap\?products=true&(?:amp;)?page=(\d+)')
+_SITEMAP_URL_RE = re.compile(r'<loc>(https://www\.ahprofi\.sk/[^<]+)</loc>')
 
 
 class AhProfiScraper(CompetitorScraper):
@@ -58,204 +69,136 @@ class AhProfiScraper(CompetitorScraper):
         self._search_param: str = (config or AHPROFI_CONFIG).get(
             "search_query_param", "search_keyword"
         )
+        self._workers: int = int((config or AHPROFI_CONFIG).get("workers", 4))
 
-    # AH Profi has no Heureka feed
     def discover_feed(self) -> str | None:
         return None
 
     def fetch_feed(self, feed_url: str) -> list[CompetitorListing]:
         return []
 
+    # ------------------------------------------------------------------
+    # Full catalogue crawl via sitemap
+    # ------------------------------------------------------------------
+
+    def run_daily_iter(self, ag_catalogue: list[dict]):
+        competitor_id = self.competitor_id
+        rps = self._rate_limit_rps
+        workers = self._workers
+
+        def _scrape(url: str) -> CompetitorListing | None:
+            try:
+                resp = polite_get(get_thread_client(), url, min_rps=rps)
+                resp.raise_for_status()
+            except Exception:
+                return None
+            return _parse_product_page(resp.text, competitor_id, url)
+
+        try:
+            resp = polite_get(self.http_client, _SITEMAP_URL, min_rps=0.5)
+            resp.raise_for_status()
+        except Exception:
+            return
+
+        page_nums = sorted({int(p) for p in _SITEMAP_PAGE_RE.findall(resp.text)})
+        if not page_nums:
+            return
+
+        for page_num in page_nums:
+            sitemap_page_url = f"{_SITEMAP_URL}?products=true&page={page_num}"
+            try:
+                resp = polite_get(self.http_client, sitemap_page_url, min_rps=rps)
+                resp.raise_for_status()
+            except Exception:
+                continue
+            product_urls = _SITEMAP_URL_RE.findall(resp.text)
+            if not product_urls:
+                continue
+            yield from parallel_map(product_urls, _scrape, workers=workers)
+
+    # ------------------------------------------------------------------
+    # Search fallback
+    # ------------------------------------------------------------------
+
     def search_by_mpn(self, brand: str, mpn: str) -> CompetitorListing | None:
-        # AH Profi indexes MPN with spaces between digits blocks better
-        # e.g. "87-01-250" → "87 01 250"
-        mpn_spaced = re.sub(r"[\-._]+", " ", mpn).strip()
-        return self.search_by_query(f"{brand} {mpn_spaced}".strip())
+        # Strip all separators — ahprofi indexes by condensed code e.g. "8701250"
+        normalised = re.sub(r"[\-._\s]+", "", mpn).strip()
+        if not normalised:
+            return None
+        return self._search_and_parse(normalised)
 
     def search_by_query(self, query: str) -> CompetitorListing | None:
-        url = urljoin(self.base_url.rstrip("/") + "/", self._search_path)
-        response = polite_get(
-            self.http_client,
-            url,
-            min_rps=self._rate_limit_rps,
-            referer=self.base_url,
-            params={self._search_param: query},
-        )
-        response.raise_for_status()
-        listing = _parse_first_product(response.text, self.base_url, self.competitor_id)
-        if listing is None:
+        return self._search_and_parse(query.strip())
+
+    def _search_and_parse(self, query: str) -> CompetitorListing | None:
+        search_url = urljoin(self.base_url.rstrip("/") + "/", self._search_path)
+        try:
+            resp = polite_get(
+                self.http_client,
+                search_url,
+                min_rps=self._rate_limit_rps,
+                referer=self.base_url,
+                params={self._search_param: query},
+            )
+            resp.raise_for_status()
+        except Exception:
             return None
-        return enrich_from_detail_page(
-            listing, self.http_client, min_rps=self._rate_limit_rps, referer=url
-        )
+
+        final_url = str(resp.url)
+        # If still on search results page, no exact match was found
+        if _SEARCH_PAGE_MARKER in final_url:
+            return None
+
+        return _parse_product_page(resp.text, self.competitor_id, final_url)
 
 
 # ---------------------------------------------------------------------------
-# HTML parsing
+# Product page parser — microdata + og tags
 # ---------------------------------------------------------------------------
 
-class _ProductItem:
-    __slots__ = ("title", "href", "mpn", "price_raw", "availability")
-
-    def __init__(self):
-        self.title: str | None = None
-        self.href: str = ""
-        self.mpn: str | None = None
-        self.price_raw: str | None = None
-        self.availability: str | None = None
+_OG_TITLE_RE = re.compile(r'og:title"[^>]*content="([^"]+)"')
+_EAN_RE = re.compile(r'itemprop="gtin13"\s*>\s*(\d{8,13})\s*<')
+_PRODUCT_ID_RE = re.compile(r'itemprop="productID"\s*>\s*([^\s<]+)\s*<')
+_PRICE_RE = re.compile(r'itemprop="price"\s+content="([\d.]+)"')
+_AVAIL_RE = re.compile(r'itemprop="availability"[^>]*href="([^"]+)"')
 
 
-# Void elements do not get a matching handle_endtag call from HTMLParser,
-# so we must not increment depth for them.
-_VOID_ELEMENTS = frozenset(
-    "area base br col embed hr img input link meta param source track wbr".split()
-)
-
-
-class _AhProfiHTMLParser(HTMLParser):
-    """State-machine parser for AH Profi search results.
-
-    Walks the DOM looking for:
-      .listing-products → enters product-list context
-      .item.col-special  → start of one product item
-      span.user_code     → collects MPN text
-      a[itemprop=url]    → collects href; next span[itemprop=name] → title
-      span.price (inside .final-price) → collects price text
-      span.green (inside .availability) → stock status
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.products: list[_ProductItem] = []
-        self._in_listing = False
-        self._item: _ProductItem | None = None
-        # per-item nesting depth tracker
-        self._item_depth: int = 0
-        self._tag_depth: int = 0
-
-        # field collection flags
-        self._collect: str | None = None  # 'mpn' | 'title' | 'price' | 'stock'
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attr = dict(attrs)
-        classes = set((attr.get("class") or "").split())
-        if tag not in _VOID_ELEMENTS:
-            self._tag_depth += 1
-
-        if not self._in_listing:
-            if "listing-products" in classes:
-                self._in_listing = True
-            return
-
-        # New product item
-        if (
-            self._item is None
-            and "item" in classes
-            and "col-special" in classes
-            and "bg-white" in classes
-        ):
-            self._item = _ProductItem()
-            self._item_depth = self._tag_depth
-            return
-
-        if self._item is None:
-            return
-
-        # --- inside a product item ---
-        itemprop = attr.get("itemprop", "")
-
-        if tag == "span" and "user_code" in classes:
-            self._collect = "mpn"
-
-        elif tag == "a" and itemprop == "url":
-            href = attr.get("href") or ""
-            self._item.href = href
-
-        elif tag == "span" and itemprop == "name":
-            self._collect = "title"
-
-        elif tag == "span" and "price" in classes and "line-through" not in classes:
-            # only collect price if we're inside final-price; check class hierarchy via parent
-            # simplification: collect price text, keep last value → final-price is printed last
-            self._collect = "price"
-
-        elif tag == "span" and "green" in classes:
-            self._collect = "stock"
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag not in _VOID_ELEMENTS:
-            self._tag_depth -= 1
-        self._collect = None
-
-        if self._item is not None and self._tag_depth < self._item_depth:
-            # Exited the product item div
-            self.products.append(self._item)
-            self._item = None
-
-    def handle_data(self, data: str) -> None:
-        if self._item is None or self._collect is None:
-            return
-        text = unescape(data).strip()
-        if not text:
-            return
-        if self._collect == "mpn":
-            self._item.mpn = text
-        elif self._collect == "title":
-            self._item.title = (self._item.title or "") + text
-        elif self._collect == "price":
-            # Keep updating — the final-price span comes after the crossed-out old price
-            self._item.price_raw = (self._item.price_raw or "") + text
-        elif self._collect == "stock":
-            self._item.availability = text
-
-
-def _parse_first_product(
-    html: str, base_url: str, competitor_id: str
+def _parse_product_page(
+    html: str, competitor_id: str, url: str
 ) -> CompetitorListing | None:
-    parser = _AhProfiHTMLParser()
-    parser.feed(html)
-    if not parser.products:
+    title_m = _OG_TITLE_RE.search(html)
+    if not title_m:
         return None
-    item = parser.products[0]
-    if not item.title or not item.price_raw:
+    title = title_m.group(1).split(" | ")[0].strip()
+    if not title:
+        return None
+
+    price_m = _PRICE_RE.search(html)
+    if not price_m:
         return None
     try:
-        price = _parse_price(item.price_raw)
+        price_eur = float(price_m.group(1))
     except ValueError:
         return None
+
+    ean_m = _EAN_RE.search(html)
+    pid_m = _PRODUCT_ID_RE.search(html)
+    avail_m = _AVAIL_RE.search(html)
+
+    in_stock: bool | None = None
+    if avail_m:
+        in_stock = "InStock" in avail_m.group(1)
+
     return CompetitorListing(
         competitor_id=competitor_id,
-        competitor_sku=item.mpn,
-        brand=None,  # not exposed in listing
-        mpn=item.mpn,
-        ean=None,
-        title=item.title.strip(),
-        price_eur=price,
+        competitor_sku=pid_m.group(1) if pid_m else None,
+        brand=None,
+        mpn=pid_m.group(1) if pid_m else None,
+        ean=ean_m.group(1) if ean_m else None,
+        title=title,
+        price_eur=price_eur,
         currency="EUR",
-        in_stock=_parse_stock(item.availability),
-        url=urljoin(base_url.rstrip("/") + "/", item.href),
+        in_stock=in_stock,
+        url=url,
         scraped_at=datetime.now(UTC),
     )
-
-
-def _parse_price(text: str) -> float:
-    cleaned = (
-        text.replace("€", "")
-        .replace("\xa0", " ")
-        .replace("EUR", "")
-        .strip()
-        .replace(" ", "")
-        .replace(",", ".")
-    )
-    return float(cleaned)
-
-
-def _parse_stock(text: str | None) -> bool | None:
-    if text is None:
-        return None
-    lower = text.lower()
-    if "skladom" in lower or "instock" in lower:
-        return True
-    if "out" in lower or "nedostupn" in lower:
-        return False
-    return None

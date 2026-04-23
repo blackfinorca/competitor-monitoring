@@ -766,42 +766,53 @@ def _render_coverage_tab() -> None:
             """)
         ).fetchall()
 
-    if not listing_counts:
-        st.info("No competitor listings in the last 7 days. Run a search or use the CLI scraper.")
-        return
-
     own_stores = own_store_ids()
+
+    # Build base from ALL configured competitors so every one appears even if
+    # it has no data in the DB yet.
+    all_configs = load_competitors()
+    base_df = pd.DataFrame([
+        {"competitor_id": c["id"], "name": c.get("name", c["id"])}
+        for c in all_configs
+    ])
+
     counts_df = pd.DataFrame(listing_counts, columns=["competitor_id", "listings", "last_scraped"])
     match_df = pd.DataFrame(match_counts, columns=["competitor_id", "matches"])
 
-    all_df = counts_df.merge(match_df, on="competitor_id", how="left")
+    all_df = (
+        base_df
+        .merge(counts_df, on="competitor_id", how="left")
+        .merge(match_df, on="competitor_id", how="left")
+    )
+    all_df["listings"] = all_df["listings"].fillna(0).astype(int)
     all_df["matches"] = all_df["matches"].fillna(0).astype(int)
-    # Match rate = matched listings / total scraped listings for that competitor
     all_df["match_rate"] = (
         (all_df["matches"] / all_df["listings"].replace(0, float("nan")) * 100)
         .round(1)
         .fillna(0.0)
     )
-    all_df = all_df.sort_values("listings", ascending=False)
+    all_df["own_store"] = all_df["competitor_id"].isin(own_stores)
+    all_df = all_df.sort_values(["own_store", "listings"], ascending=[True, False])
 
-    competitor_df = all_df[~all_df["competitor_id"].isin(own_stores)]
-    own_df = all_df[all_df["competitor_id"].isin(own_stores)]
+    competitor_df = all_df[~all_df["own_store"]]
+    own_df = all_df[all_df["own_store"]]
 
-    total_listings = int(competitor_df["listings"].sum()) if not competitor_df.empty else 0
-    total_matched = int(competitor_df["matches"].sum()) if not competitor_df.empty else 0
+    active_competitors = int((competitor_df["listings"] > 0).sum())
+    total_listings = int(competitor_df["listings"].sum())
+    total_matched = int(competitor_df["matches"].sum())
     overall_rate = round(total_matched / total_listings * 100, 1) if total_listings else 0.0
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Active competitors (7d)", len(competitor_df))
-    k2.metric("Total listings (7d)", total_listings)
+    k1.metric("Competitors (configured)", len(competitor_df))
+    k2.metric(f"Active last 7d / Total listings", f"{active_competitors} / {total_listings}")
     k3.metric("Total matched", total_matched)
     k4.metric("Overall match rate", f"{overall_rate:.1f}%")
 
     st.divider()
 
     def _freshness_badge(ts) -> str:
-        if ts is None:
-            return "Never"
+        if ts is None or pd.isna(ts):
+            return "⚪ Never"
         delta = pd.Timestamp.utcnow().tz_localize(None) - pd.Timestamp(ts).tz_localize(None)
         hours = delta.total_seconds() / 3600
         if hours < 26:
@@ -814,12 +825,14 @@ def _render_coverage_tab() -> None:
         display = df.copy()
         display["competitor_id"] = display["competitor_id"].apply(_display_name)
         display["freshness"] = display["last_scraped"].apply(_freshness_badge)
-        display["match_rate"] = display["match_rate"].apply(lambda x: f"{x:.1f}%")
+        display["match_rate"] = display["match_rate"].apply(lambda x: f"{x:.1f}%" if x else "—")
+        display["listings"] = display["listings"].apply(lambda x: x if x > 0 else "—")
+        display["matches"] = display["matches"].apply(lambda x: x if x > 0 else "—")
         st.dataframe(
             display[["competitor_id", "listings", "matches", "match_rate", "freshness"]].rename(
                 columns={
                     "competitor_id": "Store",
-                    "listings": "Listings",
+                    "listings": "Listings (7d)",
                     "matches": "Matched",
                     "match_rate": "Match Rate",
                     "freshness": "Last Scraped",
@@ -829,20 +842,17 @@ def _render_coverage_tab() -> None:
             hide_index=True,
         )
 
-    st.subheader("Competitors (last 7 days)")
-    if competitor_df.empty:
-        st.info("No competitor listings found.")
-    else:
-        _render_health_table(competitor_df)
+    st.subheader("Competitors")
+    _render_health_table(competitor_df)
 
     if not own_df.empty:
         st.subheader("Own stores")
         st.caption("Scraped as baseline — excluded from competitor benchmarks.")
         _render_health_table(own_df)
 
-    if not competitor_df.empty:
-        st.subheader("Listings per competitor")
-        chart_data = competitor_df.copy()
+    chart_data = competitor_df[competitor_df["listings"].apply(lambda x: isinstance(x, (int, float)) and x > 0)].copy()
+    if not chart_data.empty:
+        st.subheader("Listings per competitor (last 7 days)")
         chart_data["competitor_id"] = chart_data["competitor_id"].apply(_display_name)
         st.bar_chart(chart_data.set_index("competitor_id")[["listings"]])
 
@@ -891,7 +901,7 @@ abbreviations (e.g. `knipex` = `KNIPEX`).
 | AH Profi | Search-by-MPN | Custom HTML parser |
 | NaradieShop | Search-by-MPN | ThirtyBees HTML parser |
 | Doktor Kladivo | Search-by-MPN | JSON-LD ItemList |
-| Rebiop | Search-by-MPN | `/search/products?q=` |
+| Rebiop | Full catalogue crawl | BFS over categories + detail pages; EAN + internal code |
 | BO-Import (CZ) | Manufacturer-page crawl | Authorized KNIPEX distributor CZ; JSON-LD; CZK→EUR |
 | AGI (SK) | Manufacturer-page crawl | rshop platform; JSON-LD; EAN via gtin; EUR prices |
 | Ferant | — | DNS failure as of 2026-04; skipped |
