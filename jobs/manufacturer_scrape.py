@@ -118,11 +118,13 @@ def _scrape_catalogue_competitor(
             buffer.append(listing)
             if len(buffer) >= _SAVE_BATCH_SIZE:
                 buffer, saved = _flush(buffer, factory, cid, saved)
-    except Exception:
+    except BaseException:
         with _log_lock:
-            logger.exception("Error scraping %s after %d saved", cid, saved)
+            logger.exception("Error/interrupt scraping %s after %d saved", cid, saved)
+        raise
+    finally:
+        buffer, saved = _flush(buffer, factory, cid, saved)
 
-    buffer, saved = _flush(buffer, factory, cid, saved)
     _log("Saved %d listings for %s", saved, cid)
     return cid, saved
 
@@ -150,11 +152,13 @@ def _scrape_feed_competitor(
                 buffer.append(listing)
                 if len(buffer) >= _SAVE_BATCH_SIZE:
                     buffer, saved = _flush(buffer, factory, cid, saved)
-    except Exception:
+    except BaseException:
         with _log_lock:
-            logger.exception("Error scraping %s after %d saved", cid, saved)
+            logger.exception("Error/interrupt scraping %s after %d saved", cid, saved)
+        raise
+    finally:
+        buffer, saved = _flush(buffer, factory, cid, saved)
 
-    buffer, saved = _flush(buffer, factory, cid, saved)
     _log("Saved %d listings for %s", saved, cid)
     return cid, saved
 
@@ -171,19 +175,25 @@ def _scrape_search_competitor(
     _log("Scraping %s (search-by-MPN) for %d products …", cid, len(reference_products))
 
     saved, buffer = 0, []
-    for ref in reference_products:
-        if not ref.brand or not ref.mpn:
-            continue
-        try:
-            listing = scraper.search_by_mpn(ref.brand, ref.mpn)
-            if listing:
-                buffer.append(listing)
-                if len(buffer) >= _SAVE_BATCH_SIZE:
-                    buffer, saved = _flush(buffer, factory, cid, saved)
-        except Exception:
-            pass  # individual search failure — continue
+    try:
+        for ref in reference_products:
+            if not ref.brand or not ref.mpn:
+                continue
+            try:
+                listing = scraper.search_by_mpn(ref.brand, ref.mpn)
+                if listing:
+                    buffer.append(listing)
+                    if len(buffer) >= _SAVE_BATCH_SIZE:
+                        buffer, saved = _flush(buffer, factory, cid, saved)
+            except Exception:
+                pass  # individual search failure — continue
+    except BaseException:
+        with _log_lock:
+            logger.exception("Error/interrupt scraping %s after %d saved", cid, saved)
+        raise
+    finally:
+        buffer, saved = _flush(buffer, factory, cid, saved)
 
-    buffer, saved = _flush(buffer, factory, cid, saved)
     _log("Saved %d listings for %s", saved, cid)
     return cid, saved
 
@@ -239,9 +249,11 @@ def main(
                 reference_products.append(listing)
                 if len(tz_buffer) >= _SAVE_BATCH_SIZE:
                     tz_buffer, tz_saved = _flush(tz_buffer, factory, "toolzone_sk", tz_saved)
-        except Exception:
-            logger.exception("Error scraping ToolZone")
-        tz_buffer, tz_saved = _flush(tz_buffer, factory, "toolzone_sk", tz_saved)
+        except BaseException:
+            logger.exception("Error/interrupt scraping ToolZone")
+            raise
+        finally:
+            tz_buffer, tz_saved = _flush(tz_buffer, factory, "toolzone_sk", tz_saved)
         counts["toolzone_sk"] = tz_saved
         _log("ToolZone: %d reference products scraped", len(reference_products))
     else:

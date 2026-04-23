@@ -12,8 +12,8 @@ from pathlib import Path
 
 import openpyxl
 
-_DEFAULT_XLSX = "item-analysis/Allegro zalistované položky 42026 (1).xlsx"
-_DEFAULT_CSV = "data/allegro_eans.csv"
+_DEFAULT_XLSX = "item-analysis/Allegro zalistované položky 42026.xlsx"
+_DEFAULT_CSV = "item-analysis/allegro_eans.csv"
 
 
 def main(xlsx_path: str = _DEFAULT_XLSX, csv_path: str = _DEFAULT_CSV) -> int:

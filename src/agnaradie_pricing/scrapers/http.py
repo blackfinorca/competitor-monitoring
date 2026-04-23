@@ -39,7 +39,7 @@ _DEFAULT_HEADERS = {
     "User-Agent": _DEFAULT_UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "sk-SK,sk;q=0.9,cs;q=0.8,en-US;q=0.7,en;q=0.6",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "DNT": "1",
     "Upgrade-Insecure-Requests": "1",
 }

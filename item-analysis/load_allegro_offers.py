@@ -38,7 +38,7 @@ def _parse_dt(value: str | None):
         return None
 
 
-def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> int:
+def main(input_path: str = "item-analysis/allegro_offers.csv", dry_run: bool = False) -> int:
     path = Path(input_path)
     if not path.exists():
         print(f"ERROR: {input_path} not found", file=sys.stderr)
@@ -78,7 +78,7 @@ def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> 
                         UPDATE allegro_offers
                         SET title=:title, seller_url=:seller_url,
                             price_eur=:price_eur, delivery_eur=:delivery_eur,
-                            scraped_at=:scraped_at
+                            box_price_eur=:box_price_eur, scraped_at=:scraped_at
                         WHERE ean=:ean AND seller=:seller
                     """),
                     {
@@ -88,6 +88,7 @@ def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> 
                         "seller_url": r.get("seller_url"),
                         "price_eur": _parse_float(r.get("price_eur")),
                         "delivery_eur": _parse_float(r.get("delivery_eur")),
+                        "box_price_eur": _parse_float(r.get("box_price_eur")),
                         "scraped_at": _parse_dt(r.get("scraped_at")),
                     },
                 )
@@ -96,9 +97,9 @@ def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> 
                 session.execute(
                     text("""
                         INSERT INTO allegro_offers
-                            (ean, title, seller, seller_url, price_eur, delivery_eur, scraped_at)
+                            (ean, title, seller, seller_url, price_eur, delivery_eur, box_price_eur, scraped_at)
                         VALUES
-                            (:ean, :title, :seller, :seller_url, :price_eur, :delivery_eur, :scraped_at)
+                            (:ean, :title, :seller, :seller_url, :price_eur, :delivery_eur, :box_price_eur, :scraped_at)
                     """),
                     {
                         "ean": r["ean"],
@@ -107,6 +108,7 @@ def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> 
                         "seller_url": r.get("seller_url"),
                         "price_eur": _parse_float(r.get("price_eur")),
                         "delivery_eur": _parse_float(r.get("delivery_eur")),
+                        "box_price_eur": _parse_float(r.get("box_price_eur")),
                         "scraped_at": _parse_dt(r.get("scraped_at")),
                     },
                 )
@@ -120,7 +122,7 @@ def main(input_path: str = "data/allegro_offers.csv", dry_run: bool = False) -> 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="data/allegro_offers.csv")
+    parser.add_argument("--input", default="item-analysis/allegro_offers.csv")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     sys.exit(main(args.input, args.dry_run))
