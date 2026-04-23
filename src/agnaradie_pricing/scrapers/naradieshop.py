@@ -56,7 +56,12 @@ _BASE_URL = "https://naradieshop.sk"
 _SITEMAP_URL = "https://naradieshop.sk/sitemap.xml"
 
 _SITEMAP_URL_RE = re.compile(r"<loc>(https://naradieshop\.sk/[^<]+)</loc>")
-_PRODUCT_URL_RE = re.compile(r'class="product-name"[^>]*href="([^"?]+)"')
+# Matches one product card block: from <li class="ajax_block_product …"> to the next one
+_PRODUCT_CARD_RE = re.compile(
+    r'<li[^>]*class="[^"]*ajax_block_product[^"]*"[^>]*>(.*?)(?=<li[^>]*class="[^"]*ajax_block_product|</ul>)',
+    re.DOTALL,
+)
+_PRODUCT_URL_IN_CARD_RE = re.compile(r'class="product-name"[^>]*href="([^"?]+)"')
 _NEXT_DISABLED_RE = re.compile(r'pagination_next[^"]*"[^>]*class="[^"]*disabled')
 
 
@@ -114,7 +119,7 @@ class NaradieShopScraper(CompetitorScraper):
                     break
 
                 product_urls = [
-                    u for u in _PRODUCT_URL_RE.findall(resp.text)
+                    u for u in _extract_listing_urls(resp.text)
                     if u not in seen_product_urls
                 ]
                 seen_product_urls.update(product_urls)
@@ -152,6 +157,27 @@ class NaradieShopScraper(CompetitorScraper):
         return enrich_from_detail_page(
             listing, self.http_client, min_rps=self._rate_limit_rps, referer=search_url
         )
+
+
+# ---------------------------------------------------------------------------
+# Listing page URL extractor
+# ---------------------------------------------------------------------------
+
+def _extract_listing_urls(html: str) -> list[str]:
+    """Return product URLs from listing cards, skipping 'Na externom sklade' products.
+
+    ThirtyBees shows externally-warehoused products in category listings but their
+    detail pages return 404. Cards with class 'quantity-cat-ext-out' are those products.
+    """
+    urls: list[str] = []
+    for m in _PRODUCT_CARD_RE.finditer(html):
+        card = m.group(1)
+        if "quantity-cat-ext-out" in card:
+            continue
+        url_m = _PRODUCT_URL_IN_CARD_RE.search(card)
+        if url_m:
+            urls.append(url_m.group(1))
+    return urls
 
 
 # ---------------------------------------------------------------------------
