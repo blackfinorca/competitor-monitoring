@@ -41,7 +41,7 @@ All seven are direct online competitors. Treat as equal weight in this phase.
 | naradieshop_sk | NaradieShop | https://www.naradieshop.sk |
 | madmat_sk | Madmat | https://www.madmat.sk |
 | centrumnaradia_sk | Centrum Náradia | https://www.centrumnaradia.sk |
-| ferant_sk | Ferant | https://www.ferant.sk |
+| fermatshop_sk | Fermatshop | https://www.fermatshop.sk |
 | toolzone_sk | ToolZone | https://www.toolzone.sk |
 
 AG Náradie's own e-shop link will be provided separately and added to config as the canonical source.
@@ -377,9 +377,9 @@ competitors:
     url: https://www.centrumnaradia.sk
     weight: 1.0
     rate_limit_rps: 1
-  - id: ferant_sk
-    name: Ferant
-    url: https://www.ferant.sk
+  - id: fermatshop_sk
+    name: Fermatshop
+    url: https://www.fermatshop.sk
     weight: 1.0
     rate_limit_rps: 1
   - id: toolzone_sk
