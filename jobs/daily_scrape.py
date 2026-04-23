@@ -97,17 +97,22 @@ def _scrape_one(
                 saved += len(buffer)
                 _log("  %s: flushed %d listings (%d total so far)", cid, len(buffer), saved)
                 buffer.clear()
-    except Exception:
+    except BaseException:
         with _log_lock:
-            logger.exception("Error scraping %s after %d saved — flushing partial batch", cid, saved)
-
-    # Flush remainder
-    if buffer:
-        with factory() as session:
-            save_competitor_listings(session, buffer)
-            session.commit()
-        saved += len(buffer)
-        buffer.clear()
+            logger.exception("Error/interrupt scraping %s after %d saved — flushing partial batch", cid, saved)
+        raise
+    finally:
+        if buffer:
+            try:
+                with factory() as session:
+                    save_competitor_listings(session, buffer)
+                    session.commit()
+                saved += len(buffer)
+                _log("  %s: flushed final %d listings (%d total)", cid, len(buffer), saved)
+                buffer.clear()
+            except Exception:
+                with _log_lock:
+                    logger.exception("  %s: failed to flush final batch", cid)
 
     _log("Saved %d listings for %s", saved, cid)
     return cid, saved
