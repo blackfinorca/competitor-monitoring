@@ -156,8 +156,9 @@ except Exception:
     _llm_status = "disabled (no OPENAI_API_KEY)"
 st.caption(f"ToolZone Pricing  ·  Today: {date.today().isoformat()}  ·  LLM: {_llm_status}")
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🔍 Product Search", "💰 Price compare", "🏭 By Manufacturer", "🩺 Coverage Health",
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🔍 Product Search", "💰 Price compare", "🏭 By Manufacturer",
+    "🩺 Coverage Health", "⚔️ Compare Competitors",
 ])
 
 
@@ -1268,6 +1269,363 @@ def _render_manufacturer_tab() -> None:
 
 
 # ===========================================================================
+# Page 5 — Compare Competitors
+# ===========================================================================
+
+@st.cache_data(ttl=300, show_spinner="Loading comparison data…")
+def _load_comparison_data(ref_id: str, opp_ids: tuple[str, ...], min_confidence: float) -> dict:
+    """Return price comparison data for ref vs each opponent in opp_ids.
+
+    SQL strategy per pair — three cases based on whether ToolZone is involved:
+      • ref = toolzone_sk → ref_price from toolzone side of listing_matches
+      • opp = toolzone_sk → opp_price from toolzone side of listing_matches
+      • neither           → double join bridged by toolzone_listing_id
+    Returns per_opp data, a merged wide-format product list, and brand aggregates.
+    """
+    def _fetch_pair(session, ref: str, opp: str, min_conf: float) -> list:
+        if ref == "toolzone_sk":
+            return session.execute(text("""
+                SELECT cl_tz.title, cl_tz.brand,
+                       cl_tz.price_eur  AS ref_price, cl_tz.url  AS ref_url,
+                       cl_opp.price_eur AS opp_price, cl_opp.url AS opp_url
+                FROM   listing_matches lm
+                JOIN   competitor_listings cl_tz  ON cl_tz.id  = lm.toolzone_listing_id
+                JOIN   competitor_listings cl_opp ON cl_opp.id = lm.competitor_listing_id
+                                                 AND cl_opp.competitor_id = :opp
+                WHERE  lm.confidence >= :mc
+                ORDER  BY cl_tz.brand, cl_tz.title
+            """), {"opp": opp, "mc": min_conf}).fetchall()
+        if opp == "toolzone_sk":
+            return session.execute(text("""
+                SELECT cl_tz.title, cl_tz.brand,
+                       cl_ref.price_eur AS ref_price, cl_ref.url AS ref_url,
+                       cl_tz.price_eur  AS opp_price, cl_tz.url  AS opp_url
+                FROM   listing_matches lm
+                JOIN   competitor_listings cl_tz  ON cl_tz.id  = lm.toolzone_listing_id
+                JOIN   competitor_listings cl_ref ON cl_ref.id = lm.competitor_listing_id
+                                                 AND cl_ref.competitor_id = :ref
+                WHERE  lm.confidence >= :mc
+                ORDER  BY cl_tz.brand, cl_tz.title
+            """), {"ref": ref, "mc": min_conf}).fetchall()
+        return session.execute(text("""
+            SELECT cl_tz.title, cl_tz.brand,
+                   cl_ref.price_eur AS ref_price, cl_ref.url AS ref_url,
+                   cl_opp.price_eur AS opp_price, cl_opp.url AS opp_url
+            FROM   listing_matches lm_ref
+            JOIN   competitor_listings cl_ref ON cl_ref.id = lm_ref.competitor_listing_id
+                                             AND cl_ref.competitor_id = :ref
+            JOIN   listing_matches lm_opp    ON lm_opp.toolzone_listing_id = lm_ref.toolzone_listing_id
+            JOIN   competitor_listings cl_opp ON cl_opp.id = lm_opp.competitor_listing_id
+                                             AND cl_opp.competitor_id = :opp
+            JOIN   competitor_listings cl_tz  ON cl_tz.id = lm_ref.toolzone_listing_id
+            WHERE  lm_ref.confidence >= :mc AND lm_opp.confidence >= :mc
+            ORDER  BY cl_tz.brand, cl_tz.title
+        """), {"ref": ref, "opp": opp, "mc": min_conf}).fetchall()
+
+    def _summarise(rows: list[dict]) -> dict:
+        valid    = [r for r in rows if r["delta_pct"] is not None]
+        wins     = [r for r in valid if r["delta_pct"] >  0.5]
+        losses   = [r for r in valid if r["delta_pct"] < -0.5]
+        brand_acc: dict[str, dict] = {}
+        for r in valid:
+            if not r["brand"]:
+                continue
+            b = brand_acc.setdefault(r["brand"], {"count": 0, "wins": 0, "delta_sum": 0.0})
+            b["count"] += 1
+            if r["delta_pct"] > 0.5:
+                b["wins"] += 1
+            b["delta_sum"] += r["delta_pct"]
+        by_brand = sorted(
+            [{"brand": br, "count": s["count"],
+              "ref_wins": s["wins"],
+              "ref_wins_pct": round(s["wins"] / s["count"] * 100, 1),
+              "avg_delta_pct": round(s["delta_sum"] / s["count"], 1)}
+             for br, s in brand_acc.items()],
+            key=lambda x: x["count"], reverse=True,
+        )
+        return {
+            "total":                len(valid),
+            "ref_cheaper_count":    len(wins),
+            "ref_cheaper_pct":      round(len(wins) / len(valid) * 100, 1) if valid else 0.0,
+            "avg_advantage_pct":    round(sum(r["delta_pct"] for r in wins)   / len(wins),   1) if wins   else 0.0,
+            "avg_disadvantage_pct": round(sum(r["delta_pct"] for r in losses) / len(losses), 1) if losses else 0.0,
+            "by_brand":             by_brand,
+        }
+
+    per_opp: dict[str, dict] = {}
+    with _session() as session:
+        for opp_id in opp_ids:
+            raw = _fetch_pair(session, ref_id, opp_id, min_confidence)
+            rows: list[dict] = []
+            for r in raw:
+                rp = float(r.ref_price) if r.ref_price is not None else None
+                op = float(r.opp_price) if r.opp_price is not None else None
+                dp = (op - rp) / rp * 100 if rp and op and rp != 0 else None
+                rows.append({
+                    "title": r.title or "", "brand": r.brand or "",
+                    "ref_price": rp, "ref_url": r.ref_url or "",
+                    "opp_price": op, "opp_url": r.opp_url or "",
+                    "delta_pct": dp,
+                })
+            per_opp[opp_id] = {"rows": rows, **_summarise(rows)}
+
+    # Merge into wide-format keyed by (title, brand)
+    merged_map: dict[tuple, dict] = {}
+    for opp_id, od in per_opp.items():
+        for r in od["rows"]:
+            key = (r["title"], r["brand"])
+            if key not in merged_map:
+                merged_map[key] = {
+                    "title": r["title"], "brand": r["brand"],
+                    "ref_price": r["ref_price"], "ref_url": r["ref_url"],
+                    "opponents": {},
+                }
+            merged_map[key]["opponents"][opp_id] = {
+                "price": r["opp_price"], "delta_pct": r["delta_pct"], "url": r["opp_url"],
+            }
+
+    for m in merged_map.values():
+        m["wins"] = sum(
+            1 for od in m["opponents"].values()
+            if od["delta_pct"] is not None and od["delta_pct"] > 0.5
+        )
+    merged = sorted(merged_map.values(), key=lambda m: (-m["wins"], m["brand"], m["title"]))
+
+    # Cross-opponent brand aggregates
+    brand_agg: dict[str, dict] = {}
+    for m in merged:
+        if not m["brand"]:
+            continue
+        b = brand_agg.setdefault(m["brand"], {"count": 0, "delta_sum": 0.0, "delta_n": 0})
+        b["count"] += 1
+        for od in m["opponents"].values():
+            if od["delta_pct"] is not None:
+                b["delta_sum"] += od["delta_pct"]
+                b["delta_n"]   += 1
+    brand_summary = sorted(
+        [{"brand": br, "count": s["count"],
+          "avg_delta_pct": round(s["delta_sum"] / s["delta_n"], 1) if s["delta_n"] else 0.0}
+         for br, s in brand_agg.items()],
+        key=lambda x: x["count"], reverse=True,
+    )
+    return {"per_opp": per_opp, "merged": merged, "brand_summary": brand_summary}
+
+
+def _generate_insights(data: dict, ref_name: str, opp_ids: list[str]) -> str:
+    import json as _json
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "No OPENAI_API_KEY configured."
+
+    from agnaradie_pricing.matching.llm_matcher import OpenAIClient
+    client = OpenAIClient(api_key=api_key, model="gpt-4.1-mini", max_tokens=512)
+
+    opponents_payload = []
+    for opp_id in opp_ids:
+        od = data["per_opp"][opp_id]
+        opponents_payload.append({
+            "name":                  _display_name(opp_id),
+            "products_compared":     od["total"],
+            "ref_cheaper_pct":       od["ref_cheaper_pct"],
+            "avg_advantage_pct":     od["avg_advantage_pct"],
+            "avg_disadvantage_pct":  abs(od["avg_disadvantage_pct"]),
+            "top_brands": [
+                {"brand": b["brand"], "ref_wins_pct": b["ref_wins_pct"], "avg_delta": b["avg_delta_pct"]}
+                for b in od["by_brand"][:3]
+            ],
+        })
+
+    payload = {
+        "reference_store":  ref_name,
+        "opponents":        opponents_payload,
+        "brand_overview":   [
+            {"brand": b["brand"], "products": b["count"], "avg_delta_pct": b["avg_delta_pct"]}
+            for b in data["brand_summary"][:5]
+        ],
+    }
+
+    prompt = f"""You are a pricing analyst for a Slovak hardware store. Analyse the multi-competitor price comparison data below and write exactly 4–5 bullet-point insights. Be specific with numbers and competitor names. Flag both strengths and weaknesses. Keep each bullet under 30 words. Output ONLY the bullets starting with "•", no headings or intro text.
+
+Data:
+{_json.dumps(payload, indent=2)}"""
+
+    return client.complete(prompt)
+
+
+def _render_compare_tab() -> None:
+    st.header("Compare Competitors")
+    st.caption("Pick a reference store and up to 4 competitors to compare against.")
+
+    names   = _competitor_names()
+    all_ids = sorted(names.keys(), key=lambda cid: names.get(cid, cid))
+    if not all_ids:
+        st.info("No competitor data yet.")
+        return
+
+    ref_default = "toolzone_sk" if "toolzone_sk" in all_ids else all_ids[0]
+
+    col_ref, col_conf, col_refresh = st.columns([2, 1, 1])
+    with col_ref:
+        ref_id = st.selectbox(
+            "Reference store",
+            all_ids,
+            index=all_ids.index(ref_default),
+            format_func=_display_name,
+            key="cc_ref",
+        )
+    with col_conf:
+        min_conf = st.select_slider(
+            "Min confidence",
+            options=[0.72, 0.80, 0.85, 0.90, 1.0],
+            value=0.85,
+            key="cc_conf",
+        )
+    with col_refresh:
+        st.write("")
+        if st.button("↺ Refresh", use_container_width=True, key="cc_refresh"):
+            _load_comparison_data.clear()
+            for k in list(st.session_state.keys()):
+                if k.startswith("cc_insights_"):
+                    del st.session_state[k]
+            st.rerun()
+
+    opp_options = [cid for cid in all_ids if cid != ref_id]
+    opp_ids_list: list[str] = st.multiselect(
+        "Compare against (up to 4)",
+        opp_options,
+        default=opp_options[:2] if len(opp_options) >= 2 else opp_options[:1],
+        format_func=_display_name,
+        max_selections=4,
+        key="cc_opp",
+    )
+
+    if not opp_ids_list:
+        st.info("Select at least one competitor to compare against.")
+        return
+
+    opp_ids = tuple(opp_ids_list)
+    data         = _load_comparison_data(ref_id, opp_ids, min_conf)
+    merged       = data["merged"]
+    per_opp      = data["per_opp"]
+    brand_summary = data["brand_summary"]
+    ref_name     = _display_name(ref_id)
+
+    if not merged:
+        st.info(
+            f"No matched products found at confidence ≥ {min_conf:.0%}. "
+            "Try lowering the confidence threshold or running more scraping/matching jobs."
+        )
+        return
+
+    # KPI row: total products + one metric per opponent
+    kpi_cols = st.columns(1 + len(opp_ids_list))
+    kpi_cols[0].metric("Products with data", len(merged))
+    for i, opp_id in enumerate(opp_ids_list):
+        s = per_opp[opp_id]
+        kpi_cols[i + 1].metric(
+            f"Cheaper vs {_display_name(opp_id)}",
+            f"{s['ref_cheaper_pct']:.0f}%",
+            help=f"{s['ref_cheaper_count']} of {s['total']} matched products",
+        )
+
+    st.divider()
+
+    # Wide product table with filter
+    filter_opt = st.radio(
+        "Show",
+        ["All products", f"✅ Stronger (beats all {len(opp_ids_list)})", "❌ Weaker (loses to all)"],
+        horizontal=True,
+        key="cc_filter",
+    )
+
+    n_opp = len(opp_ids_list)
+    if "Stronger" in filter_opt:
+        display_rows = [m for m in merged if m["wins"] == n_opp]
+    elif "Weaker" in filter_opt:
+        display_rows = [m for m in merged if m["wins"] == 0]
+    else:
+        display_rows = merged
+
+    table_data = []
+    col_cfg: dict = {}
+    for m in display_rows:
+        row: dict = {
+            "Brand":              m["brand"],
+            "Product":            m["title"][:55] + ("…" if len(m["title"]) > 55 else ""),
+            f"{ref_name} (€)":   f"{m['ref_price']:.2f}" if m["ref_price"] else "—",
+        }
+        for opp_id in opp_ids_list:
+            opp_disp = _display_name(opp_id)
+            od = m["opponents"].get(opp_id)
+            price_col = f"{opp_disp} (€)"
+            delta_col = f"vs {opp_disp}"
+            if od and od["price"]:
+                row[price_col] = f"{od['price']:.2f}"
+                dp = od["delta_pct"]
+                if dp is not None:
+                    row[delta_col] = f"+{dp:.1f}%" if dp > 0.5 else (f"{dp:.1f}%" if dp < -0.5 else "≈")
+                else:
+                    row[delta_col] = "—"
+                col_cfg[price_col] = st.column_config.TextColumn(price_col)
+            else:
+                row[price_col] = "—"
+                row[delta_col] = "—"
+        row["Wins"] = f"{m['wins']}/{n_opp}"
+        table_data.append(row)
+
+    st.dataframe(
+        pd.DataFrame(table_data),
+        use_container_width=True,
+        hide_index=True,
+        column_config=col_cfg,
+    )
+
+    # Brand breakdown chart
+    if brand_summary:
+        st.divider()
+        st.subheader("Brand breakdown — avg price delta across all competitors")
+        brand_df = (
+            pd.DataFrame(brand_summary[:15])
+            .set_index("brand")[["avg_delta_pct"]]
+            .rename(columns={"avg_delta_pct": "Avg Δ% (positive = ref cheaper)"})
+        )
+        st.bar_chart(brand_df)
+
+    # AI Insights panel
+    st.divider()
+    insights_key  = f"cc_insights_{ref_id}_{'_'.join(sorted(opp_ids_list))}"
+    llm_available = bool(os.environ.get("OPENAI_API_KEY"))
+
+    hdr_col, btn_col = st.columns([4, 1])
+    hdr_col.subheader("🤖 AI Insights")
+    with btn_col:
+        st.write("")
+        if st.button(
+            "Generate",
+            disabled=not llm_available,
+            use_container_width=True,
+            help=(
+                "Generate narrative insights with GPT-4.1-mini"
+                if llm_available
+                else "No OPENAI_API_KEY configured"
+            ),
+            key="cc_gen_insights",
+        ):
+            with st.spinner("Analysing pricing data…"):
+                try:
+                    st.session_state[insights_key] = _generate_insights(data, ref_name, opp_ids_list)
+                except Exception as exc:
+                    st.session_state[insights_key] = f"Error generating insights: {exc}"
+
+    if insights_key in st.session_state:
+        st.markdown(st.session_state[insights_key])
+    elif not llm_available:
+        st.caption("Configure `OPENAI_API_KEY` in `.env` to enable AI insights.")
+    else:
+        st.caption("Click **Generate** to produce narrative insights from the comparison data.")
+
+
+# ===========================================================================
 # Wire up tabs
 # ===========================================================================
 
@@ -1282,3 +1640,6 @@ with tab3:
 
 with tab4:
     _render_coverage_tab()
+
+with tab5:
+    _render_compare_tab()

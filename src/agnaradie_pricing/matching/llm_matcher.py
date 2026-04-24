@@ -386,5 +386,7 @@ def _parse_response(
 
 def _title_tokens(text: str) -> frozenset[str]:
     """Lower-case words ≥3 chars, excluding stop words and pure digit strings."""
-    words = re.findall(r"[a-záäčďéíľĺňóôŕšťúýž0-9]{3,}", text.lower())
+    from agnaradie_pricing.catalogue.normalise import fold_diacritics
+    folded = fold_diacritics(text.lower())
+    words = re.findall(r"[a-z0-9]{3,}", folded)
     return frozenset(w for w in words if w not in _STOP_WORDS and not w.isdigit())

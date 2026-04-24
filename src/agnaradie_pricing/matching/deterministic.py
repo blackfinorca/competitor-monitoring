@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from agnaradie_pricing.catalogue.normalise import normalise_brand, normalise_mpn
+from agnaradie_pricing.catalogue.normalise import normalise_brand, normalise_ean, normalise_mpn
 
 MatchResult = tuple[str, float]
 
@@ -11,8 +11,8 @@ MatchResult = tuple[str, float]
 def match_deterministic(
     product: Mapping[str, Any], listing: Mapping[str, Any]
 ) -> MatchResult | None:
-    product_ean = _clean_identifier(product.get("ean"))
-    listing_ean = _clean_identifier(listing.get("ean"))
+    product_ean = normalise_ean(product.get("ean"))
+    listing_ean = normalise_ean(listing.get("ean"))
     if product_ean and listing_ean and product_ean == listing_ean:
         return ("exact_ean", 1.0)
 

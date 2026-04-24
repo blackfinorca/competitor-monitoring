@@ -21,6 +21,11 @@ build/
 
 # Editor / tool local config
 .claude/
+.playwright-mcp/
+.DS_Store
+
+# Internal notes (not for version control)
+TODO.md
 
 # Allegro pipeline — generated outputs and session state (private assets)
 item-analysis/allegro_offers.csv

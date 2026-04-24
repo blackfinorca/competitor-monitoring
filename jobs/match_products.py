@@ -5,8 +5,11 @@ saves results to the `listing_matches` table.  Optionally runs the full scrape
 pipeline first so the whole flow is a single command.
 
 Matching layers (in order, first hit wins):
-  1. exact_ean   — EAN identical on both sides                 confidence 1.00
-  2. llm_fuzzy   — vector top-20 + OpenAI verification (opt-in) confidence 0.75–0.84
+  1. exact_ean   — EAN identical on both sides                  confidence 1.00
+  2. exact_mpn   — brand + MPN identical                        confidence 1.00
+  3. mpn_no_brand— MPN identical, listing has no brand          confidence 0.90
+  4. regex_ean   — EAN extracted from listing title text        confidence 0.95
+  5. llm_fuzzy   — vector top-20 + OpenAI verification (opt-in) confidence 0.75–0.84
 
 Examples
 --------
@@ -39,6 +42,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from agnaradie_pricing.catalogue.normalise import normalise_brand, normalise_ean, normalise_mpn
 from agnaradie_pricing.db.models import ListingMatch
 from agnaradie_pricing.db.session import make_session_factory
 from agnaradie_pricing.matching.llm_matcher import OpenAIClient, find_best_llm_match
@@ -49,6 +53,12 @@ logger = logging.getLogger(__name__)
 
 _MIN_LLM_CONFIDENCE = 0.75
 _LLM_CANDIDATE_LIMIT = 20
+
+# Competitors that exclusively carry a single brand — used to infer missing brand fields.
+_COMPETITOR_SINGLE_BRAND: dict[str, str] = {
+    "bo_import_cz": "KNIPEX",
+    "agi_sk":       "KNIPEX",
+}
 
 # Competitor display names for the report
 _DISPLAY_NAMES = {
@@ -144,6 +154,17 @@ def _save_matches(session, matches: list[dict]) -> int:
 # Matching logic
 # ---------------------------------------------------------------------------
 
+def _apply_brand_inference(listings: list[dict]) -> list[dict]:
+    """Fill in missing brand fields for single-brand competitors (shallow copy)."""
+    result = []
+    for cl in listings:
+        inferred = _COMPETITOR_SINGLE_BRAND.get(cl.get("competitor_id", ""))
+        if inferred and not cl.get("brand"):
+            cl = {**cl, "brand": inferred}
+        result.append(cl)
+    return result
+
+
 def _ean_match(
     toolzone_listings: list[dict],
     competitor_listings: list[dict],
@@ -151,7 +172,7 @@ def _ean_match(
 ) -> tuple[list[dict], list[dict]]:
     ean_index: dict[str, dict] = {}
     for tz in toolzone_listings:
-        ean = (tz.get("ean") or "").strip()
+        ean = normalise_ean(tz.get("ean"))
         if ean:
             ean_index[ean] = tz
 
@@ -161,7 +182,7 @@ def _ean_match(
     for cl in competitor_listings:
         if cl["id"] in already_matched:
             continue
-        ean = (cl.get("ean") or "").strip()
+        ean = normalise_ean(cl.get("ean"))
         if ean and ean in ean_index:
             tz = ean_index[ean]
             match_records.append({
@@ -174,6 +195,99 @@ def _ean_match(
             unmatched.append(cl)
 
     return match_records, unmatched
+
+
+def _deterministic_mpn_match(
+    toolzone_listings: list[dict],
+    competitor_listings: list[dict],
+    already_matched: set[int],
+) -> tuple[list[dict], list[dict]]:
+    """Layers 2–4: brand+MPN, MPN-no-brand, and regex EAN from title text."""
+    import re as _re
+
+    # Build brand+MPN index
+    brand_mpn_idx: dict[tuple[str, str], dict] = {}
+    for tz in toolzone_listings:
+        brand = normalise_brand(tz.get("brand"))
+        mpn = normalise_mpn(tz.get("mpn"))
+        if brand and mpn:
+            brand_mpn_idx[(brand, mpn)] = tz
+
+    # Build unambiguous MPN index (only MPNs unique across the TZ catalog)
+    mpn_counts: dict[str, int] = {}
+    for tz in toolzone_listings:
+        mpn = normalise_mpn(tz.get("mpn"))
+        if mpn:
+            mpn_counts[mpn] = mpn_counts.get(mpn, 0) + 1
+    mpn_uniq_idx: dict[str, dict] = {}
+    for tz in toolzone_listings:
+        mpn = normalise_mpn(tz.get("mpn"))
+        if mpn and mpn_counts[mpn] == 1:
+            mpn_uniq_idx[mpn] = tz
+
+    # Build normalised EAN index for regex title scan
+    ean_norm_idx: dict[str, dict] = {}
+    for tz in toolzone_listings:
+        ean = normalise_ean(tz.get("ean"))
+        if ean:
+            ean_norm_idx[ean] = tz
+
+    _ean_in_text = _re.compile(r"(?<!\d)(\d{8,14})(?!\d)")
+
+    match_records: list[dict] = []
+    still_unmatched: list[dict] = []
+
+    for cl in competitor_listings:
+        if cl["id"] in already_matched:
+            continue
+
+        cl_brand = normalise_brand(cl.get("brand"))
+        cl_mpn = normalise_mpn(cl.get("mpn"))
+
+        matched_tz: dict | None = None
+        match_type: str = ""
+        confidence: float = 0.0
+
+        if cl_brand and cl_mpn:
+            tz = brand_mpn_idx.get((cl_brand, cl_mpn))
+            if tz:
+                matched_tz, match_type, confidence = tz, "exact_mpn", 1.00
+
+        if not matched_tz and cl_mpn and not cl_brand:
+            tz = mpn_uniq_idx.get(cl_mpn)
+            if tz:
+                matched_tz, match_type, confidence = tz, "mpn_no_brand", 0.90
+
+        if not matched_tz:
+            title = cl.get("title") or ""
+            for m in _ean_in_text.finditer(title):
+                candidate = normalise_ean(m.group(1))
+                if candidate and candidate in ean_norm_idx:
+                    matched_tz = ean_norm_idx[candidate]
+                    match_type, confidence = "regex_ean", 0.95
+                    break
+
+        if matched_tz is not None:
+            match_records.append({
+                "toolzone_listing_id": matched_tz["id"],
+                "competitor_listing_id": cl["id"],
+                "match_type": match_type,
+                "confidence": Decimal(str(round(confidence, 2))),
+            })
+        else:
+            still_unmatched.append(cl)
+
+    return match_records, still_unmatched
+
+
+def _rerank_by_brand(candidates: list[dict], listing: dict) -> list[dict]:
+    """Move brand-matching candidates to the front of the list."""
+    listing_brand = normalise_brand(listing.get("brand"))
+    if not listing_brand:
+        return candidates
+    match = [c for c in candidates if normalise_brand(c.get("brand")) == listing_brand]
+    other = [c for c in candidates if normalise_brand(c.get("brand")) != listing_brand]
+    return match + other
 
 
 def _llm_match(
@@ -198,6 +312,7 @@ def _llm_match(
             print(f"  [{done}/{total}] {cl['competitor_id']}  no candidates — skip")
             continue
 
+        candidates = _rerank_by_brand(candidates, cl)
         hit = find_best_llm_match(cl, candidates, llm_client=llm_client)
         if hit is None or hit[1][1] < _MIN_LLM_CONFIDENCE:
             print(f"  [{done}/{total}] {cl['competitor_id']}  no match for: {cl['title'][:60]}")
@@ -408,6 +523,9 @@ def main(
         logger.warning("No ToolZone listings found — nothing to match against.")
         return {"ean_matches": 0, "llm_matches": 0, "total_saved": 0}
 
+    # Infer missing brand fields for single-brand competitors
+    competitors = _apply_brand_inference(competitors)
+
     # --- Step 2: EAN matching ---
     logger.info("=== Step 1: EAN matching ===")
     ean_records, unmatched = _ean_match(toolzone, competitors, already_matched)
@@ -417,9 +535,19 @@ def main(
         ean_saved = _save_matches(session, ean_records)
     logger.info("  Saved %d EAN match records", ean_saved)
 
+    # --- Step 3: deterministic MPN / regex matching ---
+    det_saved = 0
+    if unmatched:
+        logger.info("=== Step 2: Deterministic MPN + regex matching ===")
+        det_records, unmatched = _deterministic_mpn_match(toolzone, unmatched, already_matched)
+        logger.info("  MPN/regex matches: %d  |  still unmatched: %d", len(det_records), len(unmatched))
+        with factory() as session:
+            det_saved = _save_matches(session, det_records)
+        logger.info("  Saved %d MPN/regex match records", det_saved)
+
     llm_saved = 0
 
-    # --- Step 3: LLM matching (optional) ---
+    # --- Step 4: LLM matching (optional) ---
     if use_llm and unmatched:
         api_key = settings.openai_api_key
         if not api_key:
@@ -429,7 +557,7 @@ def main(
             logger.error("OPENAI_API_KEY not set — skipping LLM matching.")
         else:
             model = settings.openai_model
-            logger.info("=== Step 2: LLM matching (%s) for %d listings ===", model, len(unmatched))
+            logger.info("=== Step 3: LLM matching (%s) for %d listings ===", model, len(unmatched))
             llm_client = OpenAIClient(api_key=api_key, model=model)
             with factory() as session:
                 already_matched_updated = _already_matched_ids(session)
@@ -439,7 +567,7 @@ def main(
             )
             logger.info("  LLM total saved: %d", llm_saved)
 
-    total_saved = ean_saved + llm_saved
+    total_saved = ean_saved + det_saved + llm_saved
 
     # --- Step 4: match summary ---
     with factory() as session:
@@ -470,6 +598,7 @@ def main(
 
     return {
         "ean_matches": ean_saved,
+        "det_matches": det_saved,
         "llm_matches": llm_saved,
         "total_saved": total_saved,
     }
@@ -532,4 +661,9 @@ Examples:
         scrape=args.scrape,
         report=not args.no_report,
     )
-    print(f"\nNew matches saved: {result['ean_matches']} EAN + {result['llm_matches']} LLM = {result['total_saved']} total")
+    print(
+        f"\nNew matches saved: {result['ean_matches']} EAN"
+        f" + {result['det_matches']} MPN/regex"
+        f" + {result['llm_matches']} LLM"
+        f" = {result['total_saved']} total"
+    )

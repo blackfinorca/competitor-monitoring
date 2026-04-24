@@ -119,8 +119,9 @@ def _record_text(record: dict[str, Any]) -> str:
 
 
 def _hash_tokens(text: str, dimensions: int) -> list[float]:
+    from agnaradie_pricing.catalogue.normalise import fold_diacritics
     vector = [0.0] * dimensions
-    for token in _TOKEN_RE.findall(text.lower()):
+    for token in _TOKEN_RE.findall(fold_diacritics(text.lower())):
         digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
         bucket = int.from_bytes(digest[:4], "big") % dimensions
         sign = 1.0 if digest[4] % 2 == 0 else -1.0
