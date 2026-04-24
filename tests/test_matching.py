@@ -29,3 +29,32 @@ def test_match_deterministic_returns_none_when_identifiers_differ() -> None:
 
 def test_openai_client_defaults_to_gpt_5_nano() -> None:
     assert OpenAIClient(api_key="test").model == "gpt-5-nano"
+
+
+def test_openai_client_uses_gpt_5_chat_completion_payload() -> None:
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    class FakeHttp:
+        def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResponse()
+
+    client = OpenAIClient(api_key="test", model="gpt-5-nano")
+    client._http = FakeHttp()  # type: ignore[assignment]
+
+    assert client.complete("match this") == "{}"
+    payload = captured["json"]
+    assert payload["model"] == "gpt-5-nano"
+    assert payload["max_completion_tokens"] == 256
+    assert payload["reasoning_effort"] == "low"
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload

@@ -378,7 +378,7 @@ def main(
 
     if not output_path:
         stem = path.stem
-        output_path = f"reports/allegro_{stem}_{date.today().isoformat()}.xlsx"
+        output_path = "item-analysis/allegro_offers_wide.xlsx"
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 

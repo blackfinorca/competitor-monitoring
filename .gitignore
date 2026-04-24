@@ -21,3 +21,12 @@ build/
 
 # Editor / tool local config
 .claude/
+
+# Allegro pipeline — generated outputs and session state (private assets)
+item-analysis/allegro_offers.csv
+item-analysis/allegro_offers_wide.xlsx
+item-analysis/allegro_eans.csv
+item-analysis/allegro_cookies.json
+item-analysis/allegro_offers_*.csv
+item-analysis/allegro_allegro_*.xlsx
+reports/

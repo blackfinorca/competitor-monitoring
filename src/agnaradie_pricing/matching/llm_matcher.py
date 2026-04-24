@@ -199,10 +199,10 @@ class OpenAIClient:
         estimated_tokens = len(prompt) // 4 + self._max_tokens
         self._rate_limiter.acquire(estimated_tokens)
 
-        # o-series reasoning models (o1, o3, o4-*) use max_completion_tokens,
+        # Reasoning-capable models use max_completion_tokens,
         # do not accept temperature, and should use reasoning_effort="low"
         # since product name matching needs no chain-of-thought.
-        is_reasoning = self.model.startswith(("o1", "o3", "o4"))
+        is_reasoning = self.model.startswith(("o1", "o3", "o4", "gpt-5"))
         payload: dict = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
