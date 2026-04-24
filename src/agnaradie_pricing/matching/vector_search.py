@@ -82,6 +82,20 @@ class TitleVectorIndex:
         query_vector = self._embedder.encode([query_text])[0]
         return self._search_vector(query_vector, limit=limit)
 
+    def search_with_scores(
+        self,
+        listing: dict[str, Any],
+        *,
+        limit: int = 20,
+    ) -> list[tuple[dict[str, Any], float]]:
+        if not self.products or limit <= 0:
+            return []
+        query_text = _record_text(listing)
+        if not query_text:
+            return []
+        query_vector = self._embedder.encode([query_text])[0]
+        return self._search_vector_with_scores(query_vector, limit=limit)
+
     def search_many(
         self,
         listings: list[dict[str, Any]],
@@ -100,12 +114,23 @@ class TitleVectorIndex:
                 yield self._search_vector(vector, limit=limit)
 
     def _search_vector(self, query_vector: list[float], *, limit: int) -> list[dict[str, Any]]:
+        return [
+            product
+            for product, _score in self._search_vector_with_scores(query_vector, limit=limit)
+        ]
+
+    def _search_vector_with_scores(
+        self,
+        query_vector: list[float],
+        *,
+        limit: int,
+    ) -> list[tuple[dict[str, Any], float]]:
         scored = [
             (_dot(query_vector, product_vector), index)
             for index, product_vector in enumerate(self._vectors)
         ]
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [self.products[index] for _score, index in scored[:limit]]
+        return [(self.products[index], score) for score, index in scored[:limit]]
 
 
 def _record_text(record: dict[str, Any]) -> str:
