@@ -7,11 +7,10 @@ new headless browser.
 HOW TO USE
 ----------
 1. Launch 1–3 Chrome windows with remote debugging (different ports, different profiles).
-   --enable-automation is required so Chrome accepts CDP browser-management commands:
      open -na "Google Chrome" --args --remote-debugging-port=9222 \
-       --user-data-dir=/tmp/allegro-chrome-1 --enable-automation https://allegro.sk
+       --user-data-dir=/tmp/allegro-chrome-1 https://allegro.sk
      open -na "Google Chrome" --args --remote-debugging-port=9223 \
-       --user-data-dir=/tmp/allegro-chrome-2 --enable-automation https://allegro.sk
+       --user-data-dir=/tmp/allegro-chrome-2 https://allegro.sk
 
 2. Run the scraper:
      python item-analysis/scrape_allegro.py --cdp 9222,9223 --limit 10   # 2 browsers, 10 EANs
@@ -324,7 +323,6 @@ def _launch_chrome(port: int) -> subprocess.Popen:
         chrome_path,
         f"--remote-debugging-port={port}",
         "--user-data-dir=/tmp/allegro-scraper-chrome",
-        "--enable-automation",           # required for CDP browser-management commands
         "--disable-blink-features=AutomationControlled",  # hides navigator.webdriver in JS
         "--no-first-run",
         "--no-default-browser-check",

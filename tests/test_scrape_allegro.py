@@ -3,6 +3,7 @@ import asyncio
 import csv
 import io
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _load_scrape_allegro_module():
@@ -192,3 +193,27 @@ def test_worker_applies_initial_stagger_before_first_scrape() -> None:
     assert sleep_calls[0] == 1.0
     assert scraped_eans == ["123"]
     assert len(persisted_batches) == 1
+
+
+def test_launch_chrome_does_not_require_enable_automation() -> None:
+    module = _load_scrape_allegro_module()
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(args):
+        popen_calls.append(args)
+        return object()
+
+    original_platform = module.sys.platform
+    original_popen = module.subprocess.Popen
+    try:
+        module.sys.platform = "linux"
+        module.subprocess.Popen = fake_popen
+        with patch("shutil.which", side_effect=["/usr/bin/google-chrome", None]):
+            module._launch_chrome(9222)
+    finally:
+        module.sys.platform = original_platform
+        module.subprocess.Popen = original_popen
+
+    assert popen_calls
+    assert "--enable-automation" not in popen_calls[0]
+    assert "--remote-debugging-port=9222" in popen_calls[0]
