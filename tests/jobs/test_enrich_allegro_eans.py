@@ -236,7 +236,8 @@ def test_main_uses_llm_only_for_ambiguous_shortlists(tmp_path, monkeypatch) -> N
             return self.products
 
         def search_with_scores(self, listing, *, limit=20):
-            del listing, limit
+            del listing
+            assert limit == 40
             return [
                 (self.products[0], 0.84),
                 (self.products[1], 0.82),

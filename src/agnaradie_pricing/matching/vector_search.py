@@ -62,6 +62,14 @@ def make_default_embedder() -> TextEmbedder:
         return HashingTextEmbedder()
 
 
+def describe_embedder(embedder: TextEmbedder) -> str:
+    if isinstance(embedder, SentenceTransformerEmbedder):
+        return f"sentence-transformers(model={embedder.model_name})"
+    if isinstance(embedder, HashingTextEmbedder):
+        return f"hashing-fallback(dimensions={embedder.dimensions})"
+    return type(embedder).__name__
+
+
 class TitleVectorIndex:
     def __init__(
         self,
@@ -71,6 +79,7 @@ class TitleVectorIndex:
     ) -> None:
         self.products = products
         self._embedder = embedder or make_default_embedder()
+        self.backend_description = describe_embedder(self._embedder)
         self._vectors = self._embedder.encode([_record_text(p) for p in products]) if products else []
 
     def search(self, listing: dict[str, Any], *, limit: int = 20) -> list[dict[str, Any]]:
@@ -112,6 +121,23 @@ class TitleVectorIndex:
             vectors = self._embedder.encode([_record_text(listing) for listing in batch])
             for vector in vectors:
                 yield self._search_vector(vector, limit=limit)
+
+    def search_many_with_scores(
+        self,
+        listings: list[dict[str, Any]],
+        *,
+        limit: int = 20,
+        batch_size: int = 256,
+    ):
+        if not self.products or limit <= 0:
+            for _listing in listings:
+                yield []
+            return
+        for start in range(0, len(listings), max(batch_size, 1)):
+            batch = listings[start : start + max(batch_size, 1)]
+            vectors = self._embedder.encode([_record_text(listing) for listing in batch])
+            for vector in vectors:
+                yield self._search_vector_with_scores(vector, limit=limit)
 
     def _search_vector(self, query_vector: list[float], *, limit: int) -> list[dict[str, Any]]:
         return [

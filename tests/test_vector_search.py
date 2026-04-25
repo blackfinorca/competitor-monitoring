@@ -42,3 +42,27 @@ def test_title_vector_index_search_many_batches_queries() -> None:
     results = list(index.search_many(listings, limit=1, batch_size=1))
 
     assert [[candidate["id"] for candidate in candidates] for candidates in results] == [[1], [2]]
+
+
+def test_title_vector_index_search_many_with_scores_batches_queries() -> None:
+    products = [
+        {"id": 1, "brand": "Knipex", "mpn": "87-01-250", "title": "Knipex Cobra 250 mm"},
+        {"id": 2, "brand": "Makita", "mpn": "DGA511Z", "title": "Makita uhlova bruska"},
+    ]
+    listings = [
+        {"brand": "Knipex", "title": "Knipex Cobra 250"},
+        {"brand": "Makita", "title": "Makita bruska aku"},
+    ]
+    index = TitleVectorIndex(products, embedder=HashingTextEmbedder(dimensions=128))
+
+    results = list(index.search_many_with_scores(listings, limit=1, batch_size=1))
+
+    assert [[candidate["id"] for candidate, _score in candidates] for candidates in results] == [[1], [2]]
+    assert all(len(candidates) == 1 for candidates in results)
+    assert all(isinstance(candidates[0][1], float) for candidates in results)
+
+
+def test_title_vector_index_exposes_backend_description() -> None:
+    index = TitleVectorIndex([], embedder=HashingTextEmbedder(dimensions=64))
+
+    assert index.backend_description == "hashing-fallback(dimensions=64)"

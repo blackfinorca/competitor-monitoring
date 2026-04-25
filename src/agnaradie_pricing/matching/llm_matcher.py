@@ -16,7 +16,7 @@ The client is model-agnostic — anything that implements LLMClient works.
 
 Confidence tiers
 ----------------
-  llm_fuzzy  0.75–0.84   LLM matched on title similarity / specs
+  llm_fuzzy  0.81–1.00   LLM matched on title similarity / specs
 
 Threshold: results below MIN_CONFIDENCE are silently discarded.
 
@@ -41,7 +41,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
-from agnaradie_pricing.catalogue.normalise import normalise_brand
+from agnaradie_pricing.catalogue.normalise import fold_diacritics, normalise_brand
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-_MAX_CANDIDATES = 20         # products sent to LLM per listing
-_MIN_CONFIDENCE = 0.75       # discard weaker LLM hits
+_MAX_CANDIDATES = 40         # products sent to LLM per listing
+_MIN_CONFIDENCE = 0.81       # discard weaker LLM hits
 _MIN_TOKEN_OVERLAP = 2       # pre-filter: minimum shared meaningful words
 _STOP_WORDS = frozenset(
     "na pre s z a so pri od do mm cm kg set kus ks sada the and for with"
@@ -179,7 +179,7 @@ class OpenAIClient:
         api_key: str,
         model: str = _DEFAULT_MODEL,
         timeout: float = 30.0,
-        max_tokens: int = 256,
+        max_tokens: int = 512,
     ) -> None:
         self._api_key = api_key
         self.model = model
@@ -195,23 +195,56 @@ class OpenAIClient:
         )
 
     def complete(self, prompt: str) -> str:
-        # Estimate tokens: ~1 token per 4 chars for the prompt + max response
-        estimated_tokens = len(prompt) // 4 + self._max_tokens
+        is_reasoning = self.model.startswith(("o1", "o3", "o4", "gpt-5"))
+        body = self._request_completion(prompt, max_tokens=self._max_tokens, reasoning_effort="minimal" if is_reasoning else None)
+        content = self._extract_content(body)
+        if content:
+            return content
+
+        if is_reasoning and self._should_retry_empty_reasoning_response(body):
+            retry_max_tokens = min(self._max_tokens * 2, 1024)
+            if retry_max_tokens > self._max_tokens:
+                logger.warning(
+                    "OpenAI returned empty content with finish_reason=length; retrying with larger completion budget (%d -> %d)",
+                    self._max_tokens,
+                    retry_max_tokens,
+                )
+                retry_body = self._request_completion(
+                    prompt,
+                    max_tokens=retry_max_tokens,
+                    reasoning_effort="minimal",
+                )
+                retry_content = self._extract_content(retry_body)
+                if retry_content:
+                    return retry_content
+                body = retry_body
+
+        return self._extract_content(body)
+
+    def __repr__(self) -> str:
+        return f"OpenAIClient(model={self.model!r})"
+
+    def _request_completion(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        reasoning_effort: str | None,
+    ) -> dict[str, Any]:
+        estimated_tokens = len(prompt) // 4 + max_tokens
         self._rate_limiter.acquire(estimated_tokens)
 
-        # Reasoning-capable models use max_completion_tokens,
-        # do not accept temperature, and should use reasoning_effort="low"
-        # since product name matching needs no chain-of-thought.
         is_reasoning = self.model.startswith(("o1", "o3", "o4", "gpt-5"))
-        payload: dict = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
         }
         if is_reasoning:
-            payload["max_completion_tokens"] = self._max_tokens
-            payload["reasoning_effort"] = "low"
+            payload["max_completion_tokens"] = max_tokens
+            if reasoning_effort is not None:
+                payload["reasoning_effort"] = reasoning_effort
         else:
-            payload["max_tokens"] = self._max_tokens
+            payload["max_tokens"] = max_tokens
             payload["temperature"] = 0.0
 
         response = self._http.post(
@@ -223,10 +256,29 @@ class OpenAIClient:
             json=payload,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        return response.json()
 
-    def __repr__(self) -> str:
-        return f"OpenAIClient(model={self.model!r})"
+    @staticmethod
+    def _extract_content(body: dict[str, Any]) -> str:
+        choices = body.get("choices") or []
+        if not choices:
+            return ""
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        return content.strip() if isinstance(content, str) else ""
+
+    @staticmethod
+    def _should_retry_empty_reasoning_response(body: dict[str, Any]) -> bool:
+        choices = body.get("choices") or []
+        if not choices:
+            return False
+        finish_reason = choices[0].get("finish_reason")
+        reasoning_tokens = (
+            (body.get("usage") or {})
+            .get("completion_tokens_details", {})
+            .get("reasoning_tokens", 0)
+        )
+        return finish_reason == "length" and bool(reasoning_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +345,9 @@ def pre_filter_candidates(
 # ---------------------------------------------------------------------------
 
 def _build_prompt(listing: dict, candidates: list[dict]) -> str:
+    listing = _normalise_prompt_record(listing)
+    candidates = [_normalise_prompt_record(candidate) for candidate in candidates]
+
     def _fmt(d: dict) -> str:
         parts = []
         if d.get("brand"):
@@ -319,14 +374,34 @@ Catalogue candidates:
 {cand_block}
 
 Task: decide which candidate (if any) is the SAME physical product as the listing.
-Same product = identical model, same size/specification variant.
+Same product = identical model, same size or specification variant.
 Different size or variant of the same model line is NOT a match.
+Examle: "specialne klieste 180 mm" matches "klieste 180 mm"
+Example: "specialne klieste 180 mm" does NOT match "klieste 160 mm"
+Example: "WIHA specialne klieste 180 mm" does NOT match "KNIPEX klieste 180 mm"
 
 Return JSON only:
 {{
   "match_index": <1-based index of best match, or null if no confident match>,
   "confidence": <float 0.0-1.0>
 }}"""
+
+
+def _normalise_prompt_record(record: dict[str, Any]) -> dict[str, Any]:
+    normalised = dict(record)
+    brand = normalise_brand(record.get("brand"))
+    title = _normalise_prompt_text(record.get("title") or "")
+    if brand:
+        normalised["brand"] = brand
+    if title or "title" in normalised:
+        normalised["title"] = title
+    return normalised
+
+
+def _normalise_prompt_text(value: str) -> str:
+    folded = fold_diacritics(value.lower())
+    cleaned = re.sub(r"[^a-z0-9]+", " ", folded)
+    return " ".join(cleaned.split())
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +450,7 @@ def _parse_response(
         return None
 
     matched_product = candidates[idx - 1]
-    result: MatchResult = ("llm_fuzzy", round(min(confidence, 0.84), 2))
+    result: MatchResult = ("llm_fuzzy", round(confidence, 2))
     logger.debug("LLM matched → product_id=%s  conf=%.2f", matched_product.get("id"), result[1])
     return (matched_product, result)
 

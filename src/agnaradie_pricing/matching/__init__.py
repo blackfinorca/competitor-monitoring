@@ -3,10 +3,9 @@
 Layers (tried in order, first hit wins):
   1. exact_ean          — EAN barcode exact match              confidence 1.00
   2. exact_mpn          — brand + MPN exact match              confidence 1.00
-  3. regex_ean_title    — EAN-13 extracted from title          confidence 0.93
-  4. regex_mpn_title    — MPN from title + brand match         confidence 0.90
-  5. regex_mpn_no_brand — MPN from title, brand absent         confidence 0.72–0.78
-  6. llm_fuzzy          — Claude title/spec similarity         confidence 0.75–0.84
+  3. mpn_no_brand       — MPN exact match, brand absent        confidence 0.90
+  4. regex_ean          — EAN extracted from title             confidence 0.95
+  5. llm_fuzzy          — OpenAI title/spec similarity         confidence ≥ 0.81
                           (only when llm_client is supplied)
 
 Single usage

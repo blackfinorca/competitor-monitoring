@@ -27,7 +27,7 @@ def test_all_offers_label_rejects_vsetky_parametre() -> None:
     assert not module._looks_like_all_offers_label("Všetky parametre")
 
 
-def test_persist_offers_batch_flushes_csv_and_rebuilds_excel() -> None:
+def test_persist_offers_batch_flushes_csv_without_rebuilding_excel() -> None:
     module = _load_scrape_allegro_module()
     sink = io.StringIO()
     writer = csv.DictWriter(sink, fieldnames=module._FIELDNAMES)
@@ -53,15 +53,32 @@ def test_persist_offers_batch_flushes_csv_and_rebuilds_excel() -> None:
         "scraped_at": "2026-04-21T00:00:00+00:00",
     }]
 
-    module._persist_offers_batch(
-        offers,
-        writer,
-        flush_tracker,
-        "item-analysis/allegro_offers.csv",
-        rebuilt_paths.append,
-    )
+    module._persist_offers_batch(offers, writer, flush_tracker)
 
     assert "123" in sink.getvalue()
+    assert flush_tracker.calls == 1
+    assert rebuilt_paths == []
+
+
+def test_finalize_output_flushes_csv_and_rebuilds_excel() -> None:
+    module = _load_scrape_allegro_module()
+
+    class FlushTracker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def flush(self) -> None:
+            self.calls += 1
+
+    flush_tracker = FlushTracker()
+    rebuilt_paths: list[str] = []
+
+    module._finalize_output(
+        flush_tracker,
+        "item-analysis/allegro_offers.csv",
+        rebuild_excel=rebuilt_paths.append,
+    )
+
     assert flush_tracker.calls == 1
     assert rebuilt_paths == ["item-analysis/allegro_offers.csv"]
 

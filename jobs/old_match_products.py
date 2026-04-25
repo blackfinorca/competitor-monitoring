@@ -26,7 +26,7 @@ from agnaradie_pricing.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-_MIN_LLM_CONFIDENCE = 0.75
+_MIN_LLM_CONFIDENCE = 0.81
 
 _DISPLAY_NAMES = {
     "bo_import_cz": "BO-Import",

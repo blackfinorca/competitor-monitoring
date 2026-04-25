@@ -47,7 +47,7 @@ def test_legacy_llm_match_uses_token_prefilter(monkeypatch) -> None:
 
     def fake_find_best_llm_match(listing, candidates, *, llm_client):
         del listing, llm_client
-        return candidates[0], ("llm_fuzzy", 0.80)
+        return candidates[0], ("llm_fuzzy", 0.86)
 
     monkeypatch.setattr(old_match_products, "pre_filter_candidates", fake_pre_filter_candidates)
     monkeypatch.setattr(old_match_products, "find_best_llm_match", fake_find_best_llm_match)
@@ -63,3 +63,73 @@ def test_legacy_llm_match_uses_token_prefilter(monkeypatch) -> None:
 
     assert saved == 1
     assert prefilter_calls == [1]
+
+
+def test_legacy_llm_match_rejects_confidence_below_threshold(monkeypatch) -> None:
+    old_match_products = _load_old_match_products_module()
+    toolzone = [
+        {"id": 10, "brand": "Knipex", "mpn": "87-01-250", "ean": "4003773012345", "title": "Knipex Cobra 250 mm"},
+    ]
+    unmatched = [
+        {
+            "id": 20,
+            "competitor_id": "example_sk",
+            "brand": "Knipex",
+            "mpn": "",
+            "ean": "",
+            "title": "Knipex Cobra 250",
+        }
+    ]
+
+    monkeypatch.setattr(old_match_products, "pre_filter_candidates", lambda listing, products: products)
+    monkeypatch.setattr(
+        old_match_products,
+        "find_best_llm_match",
+        lambda listing, candidates, *, llm_client: (candidates[0], ("llm_fuzzy", 0.80)),
+    )
+    monkeypatch.setattr(old_match_products, "_save_matches", lambda session, records: len(records))
+
+    saved = old_match_products._llm_match(
+        toolzone,
+        unmatched,
+        llm_client=object(),
+        factory=_Factory(),
+        already_matched=set(),
+    )
+
+    assert saved == 0
+
+
+def test_legacy_llm_match_accepts_confidence_at_threshold(monkeypatch) -> None:
+    old_match_products = _load_old_match_products_module()
+    toolzone = [
+        {"id": 10, "brand": "Knipex", "mpn": "87-01-250", "ean": "4003773012345", "title": "Knipex Cobra 250 mm"},
+    ]
+    unmatched = [
+        {
+            "id": 20,
+            "competitor_id": "example_sk",
+            "brand": "Knipex",
+            "mpn": "",
+            "ean": "",
+            "title": "Knipex Cobra 250",
+        }
+    ]
+
+    monkeypatch.setattr(old_match_products, "pre_filter_candidates", lambda listing, products: products)
+    monkeypatch.setattr(
+        old_match_products,
+        "find_best_llm_match",
+        lambda listing, candidates, *, llm_client: (candidates[0], ("llm_fuzzy", 0.81)),
+    )
+    monkeypatch.setattr(old_match_products, "_save_matches", lambda session, records: len(records))
+
+    saved = old_match_products._llm_match(
+        toolzone,
+        unmatched,
+        llm_client=object(),
+        factory=_Factory(),
+        already_matched=set(),
+    )
+
+    assert saved == 1

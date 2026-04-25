@@ -348,13 +348,20 @@ def _persist_offers_batch(
     offers: list[dict],
     writer: "csv.DictWriter",
     out_file,
+    output_path: str | None = None,
+) -> None:
+    for offer in offers:
+        writer.writerow(offer)
+    out_file.flush()
+
+
+def _finalize_output(
+    out_file,
     output_path: str,
     rebuild_excel=None,
 ) -> None:
     if rebuild_excel is None:
         rebuild_excel = _rebuild_wide_excel
-    for offer in offers:
-        writer.writerow(offer)
     out_file.flush()
     rebuild_excel(output_path)
 
@@ -533,8 +540,7 @@ async def run(
             print("\nInterrupted — saving progress.")
             for t in tasks:
                 t.cancel()
-
-        out_file.flush()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         for browser in browsers:
             try:
@@ -542,13 +548,11 @@ async def run(
             except Exception:
                 pass
 
+    _finalize_output(out_file, output_path)
     out_file.close()
     total_offers = counters["total"]
     not_found = counters["not_found"]
     print(f"\nDone. {total_offers} offers from {len(eans) - not_found}/{len(eans)} EANs.")
-
-    # Auto-update the wide Excel after every scrape
-    _rebuild_wide_excel(output_path)
     return 0
 
 

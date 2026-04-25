@@ -1,6 +1,6 @@
 from agnaradie_pricing.catalogue.normalise import normalise_brand, normalise_mpn
 from agnaradie_pricing.matching.deterministic import match_deterministic
-from agnaradie_pricing.matching.llm_matcher import OpenAIClient
+from agnaradie_pricing.matching.llm_matcher import OpenAIClient, find_best_llm_match
 
 
 def test_match_deterministic_prefers_ean_match() -> None:
@@ -71,7 +71,114 @@ def test_openai_client_uses_gpt_5_chat_completion_payload() -> None:
     assert client.complete("match this") == "{}"
     payload = captured["json"]
     assert payload["model"] == "gpt-5-nano"
-    assert payload["max_completion_tokens"] == 256
-    assert payload["reasoning_effort"] == "low"
+    assert payload["max_completion_tokens"] == 512
+    assert payload["reasoning_effort"] == "minimal"
     assert "max_tokens" not in payload
     assert "temperature" not in payload
+
+
+def test_openai_client_retries_empty_reasoning_response_with_larger_budget() -> None:
+    payloads: list[dict] = []
+    responses = iter(
+        [
+            {
+                "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 512}},
+            },
+            {
+                "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 32}},
+            },
+        ]
+    )
+
+    class FakeResponse:
+        def __init__(self, body: dict) -> None:
+            self._body = body
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._body
+
+    class FakeHttp:
+        def post(self, url, *, headers, json):
+            del url, headers
+            payloads.append(json)
+            return FakeResponse(next(responses))
+
+    client = OpenAIClient(api_key="test", model="gpt-5-nano")
+    client._http = FakeHttp()  # type: ignore[assignment]
+
+    assert client.complete("match this") == "{}"
+    assert len(payloads) == 2
+    assert payloads[0]["max_completion_tokens"] == 512
+    assert payloads[1]["max_completion_tokens"] == 1024
+    assert payloads[0]["reasoning_effort"] == "minimal"
+    assert payloads[1]["reasoning_effort"] == "minimal"
+
+
+def test_find_best_llm_match_normalises_names_in_prompt() -> None:
+    captured: dict[str, str] = {}
+
+    class FakeLLM:
+        def complete(self, prompt: str) -> str:
+            captured["prompt"] = prompt
+            return '{"match_index": 1, "confidence": 0.91}'
+
+    hit = find_best_llm_match(
+        {
+            "brand": "Wíha GmbH",
+            "mpn": "261šo",
+            "ean": None,
+            "title": "Špeciálne kliešte 180 mm",
+        },
+        [
+            {
+                "id": 1,
+                "brand": "Wiha GmbH",
+                "mpn": "261so",
+                "ean": None,
+                "title": "Špeciálne kliešte 180 mm",
+            }
+        ],
+        llm_client=FakeLLM(),
+    )
+
+    assert hit is not None
+    prompt = captured["prompt"]
+    assert "Brand: WIHA" in prompt
+    assert "Title: specialne klieste 180 mm" in prompt
+    assert "Špeciálne kliešte 180 mm" not in prompt
+
+
+def test_find_best_llm_match_rejects_confidence_below_0_81() -> None:
+    class FakeLLM:
+        def complete(self, prompt: str) -> str:
+            del prompt
+            return '{"match_index": 1, "confidence": 0.80}'
+
+    hit = find_best_llm_match(
+        {"brand": "Wiha", "title": "specialne klieste 180 mm"},
+        [{"id": 1, "brand": "Wiha", "title": "specialne klieste 180 mm"}],
+        llm_client=FakeLLM(),
+    )
+
+    assert hit is None
+
+
+def test_find_best_llm_match_keeps_confidence_above_threshold() -> None:
+    class FakeLLM:
+        def complete(self, prompt: str) -> str:
+            del prompt
+            return '{"match_index": 1, "confidence": 0.81}'
+
+    hit = find_best_llm_match(
+        {"brand": "Wiha", "title": "specialne klieste 180 mm"},
+        [{"id": 1, "brand": "Wiha", "title": "specialne klieste 180 mm"}],
+        llm_client=FakeLLM(),
+    )
+
+    assert hit is not None
+    assert hit[1][1] == 0.81

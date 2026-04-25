@@ -1,4 +1,4 @@
-"""Build daily pricing snapshots from matched competitor listings."""
+"""Build pricing snapshots from matched competitor listings."""
 
 import statistics
 from datetime import date, datetime, UTC

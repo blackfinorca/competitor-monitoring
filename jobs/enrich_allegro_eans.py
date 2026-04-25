@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_INPUT = Path("item-analysis/Allegro zalistované položky 42026.xlsx")
 _DEFAULT_REPORT_DIR = Path("reports")
-_VECTOR_LIMIT = 20
-_LLM_LIMIT = 10
+_VECTOR_LIMIT = 40
+_LLM_LIMIT = 40
 _DETERMINISTIC_SCORE = 0.93
 _DETERMINISTIC_MARGIN = 0.05
-_LLM_MIN_CONFIDENCE = 0.88
+_LLM_MIN_CONFIDENCE = 0.81
 _LLM_MIN_SCORE = 0.80
 _MODEL_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9./-]*\d[a-z0-9./-]*", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")

@@ -36,6 +36,7 @@ Detail page fields (parsed from <dt>/<dd> pairs):
 """
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin
@@ -180,7 +181,24 @@ class RebiopScraper(HeurekaFeedMixin, CompetitorScraper):
             resp.raise_for_status()
         except Exception:
             return None
-        return _parse_first_search_result(resp.text, self.competitor_id, self.base_url)
+        direct_hit = _parse_detail_page(resp.text, self.competitor_id, str(resp.url))
+        if direct_hit is not None:
+            return direct_hit
+
+        listing = _parse_first_search_result(resp.text, self.competitor_id, self.base_url)
+        if listing is None:
+            return None
+
+        detail_url = re.sub(r"/cat/\d+$", "", listing.url)
+        detail_hit = _scrape_detail_page(
+            self.http_client,
+            detail_url,
+            self.competitor_id,
+            rps=self._rate_limit_rps,
+        )
+        if detail_hit is not None:
+            return detail_hit
+        return replace(listing, url=detail_url)
 
 
 # ---------------------------------------------------------------------------

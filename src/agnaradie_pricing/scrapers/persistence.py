@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from sqlalchemy import inspect
+from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -36,6 +36,10 @@ def save_competitor_listings(
             stmt = stmt.on_conflict_do_update(
                 index_elements=["competitor_id", "url"],
                 set_={
+                    "competitor_sku": func.coalesce(stmt.excluded.competitor_sku, CompetitorListingRow.competitor_sku),
+                    "brand":      func.coalesce(stmt.excluded.brand, CompetitorListingRow.brand),
+                    "mpn":        func.coalesce(stmt.excluded.mpn, CompetitorListingRow.mpn),
+                    "ean":        func.coalesce(stmt.excluded.ean, CompetitorListingRow.ean),
                     "price_eur":  stmt.excluded.price_eur,
                     "in_stock":   stmt.excluded.in_stock,
                     "title":      stmt.excluded.title,
@@ -47,6 +51,10 @@ def save_competitor_listings(
             stmt = stmt.on_conflict_do_update(
                 index_elements=["competitor_id", "url"],
                 set_={
+                    "competitor_sku": func.coalesce(stmt.excluded.competitor_sku, CompetitorListingRow.competitor_sku),
+                    "brand":      func.coalesce(stmt.excluded.brand, CompetitorListingRow.brand),
+                    "mpn":        func.coalesce(stmt.excluded.mpn, CompetitorListingRow.mpn),
+                    "ean":        func.coalesce(stmt.excluded.ean, CompetitorListingRow.ean),
                     "price_eur":  stmt.excluded.price_eur,
                     "in_stock":   stmt.excluded.in_stock,
                     "title":      stmt.excluded.title,
@@ -81,4 +89,3 @@ def _to_dict(listing: CompetitorListing) -> dict:
 
 def _to_row(listing: CompetitorListing) -> CompetitorListingRow:
     return CompetitorListingRow(**_to_dict(listing))
-

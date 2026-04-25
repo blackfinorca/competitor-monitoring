@@ -9,7 +9,7 @@ Matching layers (in order, first hit wins):
   2. exact_mpn   — brand + MPN identical                        confidence 1.00
   3. mpn_no_brand— MPN identical, listing has no brand          confidence 0.90
   4. regex_ean   — EAN extracted from listing title text        confidence 0.95
-  5. llm_fuzzy   — vector top-20 + OpenAI verification (opt-in) confidence 0.75–0.84
+  5. llm_fuzzy   — vector shortlist + OpenAI verification (opt-in) confidence ≥ 0.81
 
 Examples
 --------
@@ -32,7 +32,9 @@ Examples
     python jobs/match_products.py --llm
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -42,7 +44,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from agnaradie_pricing.catalogue.normalise import normalise_brand, normalise_ean, normalise_mpn
+from agnaradie_pricing.catalogue.normalise import fold_diacritics, normalise_brand, normalise_ean, normalise_mpn
 from agnaradie_pricing.db.models import ListingMatch
 from agnaradie_pricing.db.session import make_session_factory
 from agnaradie_pricing.matching.llm_matcher import OpenAIClient, find_best_llm_match
@@ -51,8 +53,57 @@ from agnaradie_pricing.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-_MIN_LLM_CONFIDENCE = 0.75
-_LLM_CANDIDATE_LIMIT = 20
+_MIN_LLM_CONFIDENCE = 0.81
+_LLM_MIN_CANDIDATE_LIMIT = 5
+_LLM_CANDIDATE_LIMIT = 30
+_RAW_VECTOR_CANDIDATE_LIMIT = 200
+_DEBUG_TOP_CANDIDATES = 10
+_EAN_IN_TEXT_RE = re.compile(r"(?<!\d)(\d{8,14})(?!\d)")
+_MODEL_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9./-]*\d[a-z0-9./-]*", re.IGNORECASE)
+_CATEGORY_SKIP_TOKENS = frozenset(
+    {
+        "a",
+        "aj",
+        "akryl",
+        "aku",
+        "al",
+        "do",
+        "fiber",
+        "fiberglass",
+        "fasadna",
+        "fasadne",
+        "fasadny",
+        "gr",
+        "na",
+        "nasadou",
+        "obojstranna",
+        "obojstranne",
+        "obojstranny",
+        "pojazdny",
+        "premium",
+        "pre",
+        "profilova",
+        "profilove",
+        "profilovy",
+        "rukovat",
+        "rukovatou",
+        "rukovatou",
+        "s",
+        "set",
+        "so",
+        "specialna",
+        "specialne",
+        "specialny",
+        "stolova",
+        "stolove",
+        "stolovy",
+        "tvarovana",
+        "tvarovane",
+        "tvarovany",
+        "v",
+        "z",
+    }
+)
 
 # Competitors that exclusively carry a single brand — used to infer missing brand fields.
 _COMPETITOR_SINGLE_BRAND: dict[str, str] = {
@@ -290,6 +341,300 @@ def _rerank_by_brand(candidates: list[dict], listing: dict) -> list[dict]:
     return match + other
 
 
+def _normalise_debug_text(value: str) -> str:
+    folded = fold_diacritics((value or "").lower())
+    cleaned = re.sub(r"[^a-z0-9]+", " ", folded)
+    return " ".join(cleaned.split())
+
+
+def _dense_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", fold_diacritics((value or "").lower()))
+
+
+def _extract_model_tokens(value: str) -> set[str]:
+    folded = fold_diacritics((value or "").lower())
+    return {_dense_token(token) for token in _MODEL_TOKEN_RE.findall(folded) if _dense_token(token)}
+
+
+def _build_brand_token_map(toolzone_listings: list[dict]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for listing in toolzone_listings:
+        brand = normalise_brand(listing.get("brand"))
+        if not brand:
+            continue
+        for token in _normalise_debug_text(brand).split():
+            if len(token) < 3:
+                continue
+            mapping.setdefault(token, brand)
+    return mapping
+
+
+def _detect_listing_brand(listing: dict, brand_token_map: dict[str, str]) -> str | None:
+    brand = normalise_brand(listing.get("brand"))
+    if brand:
+        return brand
+    matched = {
+        canonical
+        for token, canonical in brand_token_map.items()
+        if token in set(_normalise_debug_text(listing.get("title") or "").split())
+    }
+    if len(matched) == 1:
+        return next(iter(matched))
+    return None
+
+
+def _extract_category_anchor(listing: dict, brand_token_map: dict[str, str]) -> str | None:
+    title_tokens = _normalise_debug_text(listing.get("title") or "").split()
+    brand_tokens = {token for token in title_tokens if token in brand_token_map}
+    for token in title_tokens:
+        if len(token) < 3 or token.isdigit() or any(ch.isdigit() for ch in token):
+            continue
+        if token in brand_tokens or token in _CATEGORY_SKIP_TOKENS:
+            continue
+        return token
+    return None
+
+
+def _candidate_token_set(candidate: dict) -> set[str]:
+    fields = [
+        candidate.get("title") or "",
+        candidate.get("brand") or "",
+        candidate.get("mpn") or "",
+    ]
+    return set(_normalise_debug_text(" ".join(fields)).split())
+
+
+def _candidate_dense_text(candidate: dict) -> str:
+    return _dense_token(
+        f"{candidate.get('title') or ''} {candidate.get('brand') or ''} {candidate.get('mpn') or ''}"
+    )
+
+
+def _lexical_shortlist(
+    listing: dict,
+    scored_candidates: list[tuple[dict, float]],
+    *,
+    brand_token_map: dict[str, str],
+    limit: int,
+    min_limit: int,
+) -> list[tuple[dict, float]]:
+    if not scored_candidates or limit <= 0:
+        return []
+
+    detected_brand = _detect_listing_brand(listing, brand_token_map)
+    category_anchor = _extract_category_anchor(listing, brand_token_map)
+    model_tokens = _extract_model_tokens(listing.get("title") or "")
+    listing_tokens = set(_normalise_debug_text(listing.get("title") or "").split())
+
+    ranked: list[tuple[int, int, int, int, float, dict]] = []
+    for candidate, score in scored_candidates:
+        candidate_tokens = _candidate_token_set(candidate)
+        candidate_dense = _candidate_dense_text(candidate)
+        brand_match = int(bool(detected_brand and normalise_brand(candidate.get("brand")) == detected_brand))
+        category_match = int(bool(category_anchor and category_anchor in candidate_tokens))
+        model_match_count = sum(1 for token in model_tokens if token in candidate_dense)
+        overlap = len(listing_tokens & candidate_tokens)
+        ranked.append((category_match, brand_match, model_match_count, overlap, score, candidate))
+
+    filtered = ranked
+    if category_anchor and any(item[0] for item in filtered):
+        filtered = [item for item in filtered if item[0]]
+    if detected_brand and any(item[1] for item in filtered):
+        filtered = [item for item in filtered if item[1]]
+    if model_tokens:
+        best_model_match_count = max((item[2] for item in filtered), default=0)
+        if best_model_match_count > 0:
+            filtered = [item for item in filtered if item[2] == best_model_match_count]
+
+    filtered.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]), reverse=True)
+    shortlisted = [(candidate, score) for _cat, _brand, _model, _overlap, score, candidate in filtered[:limit]]
+    if len(shortlisted) >= min_limit:
+        return shortlisted
+
+    seen_ids = {candidate.get("id") for candidate, _score in shortlisted}
+    fallback = [
+        (candidate, score)
+        for candidate, score in scored_candidates
+        if candidate.get("id") not in seen_ids
+    ]
+    return (shortlisted + fallback)[: min(limit, max(min_limit, len(shortlisted)))]
+
+
+def _normalised_query_string(listing: dict) -> str:
+    parts: list[str] = []
+    brand = normalise_brand(listing.get("brand"))
+    mpn = normalise_mpn(listing.get("mpn"))
+    ean = normalise_ean(listing.get("ean"))
+    title = _normalise_debug_text(listing.get("title") or "")
+    if brand:
+        parts.append(f"brand={brand}")
+    if mpn:
+        parts.append(f"mpn={mpn}")
+    if ean:
+        parts.append(f"ean={ean}")
+    parts.append(f"title={title}")
+    return " ".join(parts)
+
+
+def _build_expected_candidate_lookup(toolzone_listings: list[dict]) -> dict[str, dict]:
+    ean_index: dict[str, dict] = {}
+    brand_mpn_index: dict[tuple[str, str], dict] = {}
+    mpn_counts: dict[str, int] = {}
+    title_index: dict[str, list[dict]] = {}
+
+    for tz in toolzone_listings:
+        ean = normalise_ean(tz.get("ean"))
+        if ean:
+            ean_index[ean] = tz
+
+        brand = normalise_brand(tz.get("brand"))
+        mpn = normalise_mpn(tz.get("mpn"))
+        if brand and mpn:
+            brand_mpn_index[(brand, mpn)] = tz
+        if mpn:
+            mpn_counts[mpn] = mpn_counts.get(mpn, 0) + 1
+
+        title = _normalise_debug_text(tz.get("title") or "")
+        if title:
+            title_index.setdefault(title, []).append(tz)
+
+    unique_mpn_index: dict[str, dict] = {}
+    for tz in toolzone_listings:
+        mpn = normalise_mpn(tz.get("mpn"))
+        if mpn and mpn_counts.get(mpn) == 1:
+            unique_mpn_index[mpn] = tz
+
+    return {
+        "ean_index": ean_index,
+        "brand_mpn_index": brand_mpn_index,
+        "unique_mpn_index": unique_mpn_index,
+        "title_index": title_index,
+    }
+
+
+def _infer_expected_candidate(lookup: dict[str, dict], listing: dict) -> tuple[dict, str] | None:
+    ean = normalise_ean(listing.get("ean"))
+    if ean and ean in lookup["ean_index"]:
+        return lookup["ean_index"][ean], "listing_ean"
+
+    brand = normalise_brand(listing.get("brand"))
+    mpn = normalise_mpn(listing.get("mpn"))
+    if brand and mpn:
+        candidate = lookup["brand_mpn_index"].get((brand, mpn))
+        if candidate:
+            return candidate, "exact_mpn"
+    if not brand and mpn:
+        candidate = lookup["unique_mpn_index"].get(mpn)
+        if candidate:
+            return candidate, "mpn_no_brand"
+
+    title = listing.get("title") or ""
+    for match in _EAN_IN_TEXT_RE.finditer(title):
+        candidate = lookup["ean_index"].get(normalise_ean(match.group(1)))
+        if candidate:
+            return candidate, "regex_ean"
+
+    normalised_title = _normalise_debug_text(title)
+    title_matches = lookup["title_index"].get(normalised_title, [])
+    if len(title_matches) == 1:
+        return title_matches[0], "exact_title"
+
+    return None
+
+
+def _print_failure_debug(
+    listing: dict,
+    scored_candidates: list[tuple[dict, float]],
+    *,
+    expected_candidate: tuple[dict, str] | None,
+    brand_token_map: dict[str, str] | None = None,
+) -> None:
+    print(f"           normalized query: {_normalised_query_string(listing)}")
+    if brand_token_map is not None:
+        detected_brand = _detect_listing_brand(listing, brand_token_map)
+        category_anchor = _extract_category_anchor(listing, brand_token_map)
+        model_tokens = sorted(_extract_model_tokens(listing.get("title") or ""))
+        print(
+            "           anchors:"
+            f" category={category_anchor or '—'}"
+            f" brand={detected_brand or '—'}"
+            f" model_tokens={','.join(model_tokens) if model_tokens else '—'}"
+        )
+    print("           top retrieved candidates:")
+    for rank, (candidate, score) in enumerate(scored_candidates[:_DEBUG_TOP_CANDIDATES], start=1):
+        candidate_brand = normalise_brand(candidate.get("brand"))
+        candidate_mpn = normalise_mpn(candidate.get("mpn"))
+        candidate_ean = normalise_ean(candidate.get("ean"))
+        candidate_title = _normalise_debug_text(candidate.get("title") or "")
+        details = [f"id={candidate.get('id')}", f"title={candidate_title}"]
+        if candidate_brand:
+            details.insert(1, f"brand={candidate_brand}")
+        if candidate_mpn:
+            details.insert(2, f"mpn={candidate_mpn}")
+        if candidate_ean:
+            details.insert(3, f"ean={candidate_ean}")
+        print(f"             [{rank}] score={score:.4f} " + " ".join(details))
+
+    if not scored_candidates:
+        print("             (no retrieved candidates)")
+
+    if expected_candidate is None:
+        print("           expected shortlist presence: unknown")
+        return
+
+    expected_product, reason = expected_candidate
+    candidate_ids = {candidate.get("id") for candidate, _score in scored_candidates}
+    status = "yes" if expected_product.get("id") in candidate_ids else "no"
+    print(f"           expected shortlist presence: {status} ({reason})")
+
+
+def _llm_match_one(job: dict, *, llm_client) -> tuple[dict, tuple[str, float]] | None:
+    return find_best_llm_match(job["listing"], job["candidates"], llm_client=llm_client)
+
+
+def _handle_llm_match_result(
+    job: dict,
+    hit,
+    *,
+    factory,
+    debug_failures: bool,
+    expected_lookup: dict[str, dict] | None,
+    brand_token_map: dict[str, str],
+) -> int:
+    ordinal = job["ordinal"]
+    total = job["total"]
+    cl = job["listing"]
+    scored_candidates = job["scored_candidates"]
+
+    if hit is None or hit[1][1] < _MIN_LLM_CONFIDENCE:
+        print(f"  [{ordinal}/{total}] {cl['competitor_id']}  no match for: {cl['title'][:60]}")
+        if debug_failures:
+            _print_failure_debug(
+                cl,
+                scored_candidates,
+                expected_candidate=_infer_expected_candidate(expected_lookup, cl) if expected_lookup else None,
+                brand_token_map=brand_token_map,
+            )
+        return 0
+
+    matched_product, (match_type, confidence) = hit
+    record = {
+        "toolzone_listing_id": matched_product["id"],
+        "competitor_listing_id": cl["id"],
+        "match_type": match_type,
+        "confidence": Decimal(str(round(confidence, 2))),
+    }
+    with factory() as session:
+        n = _save_matches(session, [record])
+
+    status = "✓ saved" if n else "· duplicate"
+    print(
+        f"  [{ordinal}/{total}] {status}  [{_disp(cl['competitor_id'])}] {cl['title'][:50]}"
+        f"\n           → [TZ] {matched_product['title'][:50]}  conf={confidence:.2f}"
+    )
+    return n
+
+
 def _llm_match(
     toolzone_listings: list[dict],
     unmatched: list[dict],
@@ -297,42 +642,84 @@ def _llm_match(
     factory,
     *,
     already_matched: set[int],
+    debug_failures: bool = False,
+    openai_workers: int = 4,
 ) -> int:
     """Run LLM matching, print each hit to stdout, and save immediately. Returns total saved."""
     saved = 0
     pending = [cl for cl in unmatched if cl["id"] not in already_matched]
     total = len(pending)
     candidate_index = TitleVectorIndex(toolzone_listings)
+    brand_token_map = _build_brand_token_map(toolzone_listings)
+    expected_lookup = _build_expected_candidate_lookup(toolzone_listings) if debug_failures else None
 
-    for done, (cl, candidates) in enumerate(
-        zip(pending, candidate_index.search_many(pending, limit=_LLM_CANDIDATE_LIMIT)),
+    print(f"Vector retrieval backend: {candidate_index.backend_description}")
+
+    jobs: list[dict] = []
+    for done, (cl, raw_scored_candidates) in enumerate(
+        zip(pending, candidate_index.search_many_with_scores(pending, limit=_RAW_VECTOR_CANDIDATE_LIMIT)),
         start=1,
     ):
+        scored_candidates = _lexical_shortlist(
+            cl,
+            raw_scored_candidates,
+            brand_token_map=brand_token_map,
+            limit=_LLM_CANDIDATE_LIMIT,
+            min_limit=_LLM_MIN_CANDIDATE_LIMIT,
+        )
+        candidates = [candidate for candidate, _score in scored_candidates]
         if not candidates:
             print(f"  [{done}/{total}] {cl['competitor_id']}  no candidates — skip")
+            if debug_failures:
+                _print_failure_debug(
+                    cl,
+                    scored_candidates,
+                    expected_candidate=_infer_expected_candidate(expected_lookup, cl) if expected_lookup else None,
+                    brand_token_map=brand_token_map,
+                )
             continue
 
-        candidates = _rerank_by_brand(candidates, cl)
-        hit = find_best_llm_match(cl, candidates, llm_client=llm_client)
-        if hit is None or hit[1][1] < _MIN_LLM_CONFIDENCE:
-            print(f"  [{done}/{total}] {cl['competitor_id']}  no match for: {cl['title'][:60]}")
-            continue
+        jobs.append(
+            {
+                "ordinal": done,
+                "total": total,
+                "listing": cl,
+                "scored_candidates": scored_candidates,
+                "candidates": _rerank_by_brand(candidates, cl),
+            }
+        )
 
-        matched_product, (match_type, confidence) = hit
-        record = {
-            "toolzone_listing_id": matched_product["id"],
-            "competitor_listing_id": cl["id"],
-            "match_type": match_type,
-            "confidence": Decimal(str(round(confidence, 2))),
-        }
-        with factory() as session:
-            n = _save_matches(session, [record])
-        saved += n
+    worker_count = max(1, min(openai_workers, 4))
+    should_parallelize = isinstance(llm_client, OpenAIClient) and worker_count > 1 and len(jobs) > 1
+    if should_parallelize:
+        print(f"OpenAI concurrency: {worker_count} workers")
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_to_job = {
+                executor.submit(_llm_match_one, job, llm_client=llm_client): job
+                for job in jobs
+            }
+            for future in as_completed(future_to_job):
+                job = future_to_job[future]
+                hit = future.result()
+                saved += _handle_llm_match_result(
+                    job,
+                    hit,
+                    factory=factory,
+                    debug_failures=debug_failures,
+                    expected_lookup=expected_lookup,
+                    brand_token_map=brand_token_map,
+                )
+        return saved
 
-        status = "✓ saved" if n else "· duplicate"
-        print(
-            f"  [{done}/{total}] {status}  [{_disp(cl['competitor_id'])}] {cl['title'][:50]}"
-            f"\n           → [TZ] {matched_product['title'][:50]}  conf={confidence:.2f}"
+    for job in jobs:
+        hit = _llm_match_one(job, llm_client=llm_client)
+        saved += _handle_llm_match_result(
+            job,
+            hit,
+            factory=factory,
+            debug_failures=debug_failures,
+            expected_lookup=expected_lookup,
+            brand_token_map=brand_token_map,
         )
 
     return saved
@@ -473,6 +860,8 @@ def main(
     force: bool = False,
     scrape: bool = False,
     report: bool = True,
+    debug_failures: bool = False,
+    openai_workers: int = 4,
 ) -> dict:
     """Run optional scrape → match → report pipeline.
 
@@ -564,6 +953,8 @@ def main(
             llm_saved = _llm_match(
                 toolzone, unmatched, llm_client, factory,
                 already_matched=already_matched_updated,
+                debug_failures=debug_failures,
+                openai_workers=openai_workers,
             )
             logger.info("  LLM total saved: %d", llm_saved)
 
@@ -650,6 +1041,17 @@ Examples:
         action="store_true",
         help="Skip the price-comparison table at the end.",
     )
+    parser.add_argument(
+        "--debug-failures",
+        action="store_true",
+        help="For each LLM miss, print the normalized query, top 10 retrieved candidates, scores, and shortlist presence diagnostics.",
+    )
+    parser.add_argument(
+        "--openai-workers",
+        type=int,
+        default=4,
+        help="Parallel OpenAI verification workers for match_products.py (1-4, OpenAI only).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -660,6 +1062,8 @@ Examples:
         force=args.force,
         scrape=args.scrape,
         report=not args.no_report,
+        debug_failures=args.debug_failures,
+        openai_workers=args.openai_workers,
     )
     print(
         f"\nNew matches saved: {result['ean_matches']} EAN"

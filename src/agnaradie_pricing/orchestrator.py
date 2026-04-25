@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-CACHE_MAX_AGE_HOURS = 24       # freshness threshold for both products and listings
+CACHE_MAX_AGE_HOURS = 24 * 30  # 30-day freshness threshold for both products and listings
 _EAN_RE = re.compile(r"^\d{8}(?:\d{4,5})?$")  # EAN-8, EAN-13
 _MPN_RE = re.compile(r"^\d{2}[-\s]\d{2}[-\s]\d{3}$|^[A-Z0-9]{2,}(?:[-/][A-Z0-9]+)+$", re.I)
 

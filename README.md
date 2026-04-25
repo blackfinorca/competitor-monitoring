@@ -14,6 +14,9 @@ scripts/bootstrap_db.sh
 alembic upgrade head
 ```
 
+After activating the virtualenv, run jobs with `python` or `./.venv/bin/python`.
+The system `python3` on some machines may be older than the repo's Python 3.11 syntax.
+
 ---
 
 ## Pipeline Overview
@@ -43,16 +46,22 @@ daily_scrape.py              daily_scrape.py --manufacturer knipex
                                Phase 3: Search competitors vs TZ MPNs
 ```
 
+`daily_scrape.py` saves listings to the DB in batches during the run and flushes
+the pending buffer on shutdown/interrupt, so long scrapes keep their partial progress.
+The current operational cadence is a **monthly** scrape + analytics cycle.
+
 ---
 
 ## Competitors
 
 | ID | Name | Scrape method |
 |----|------|--------------|
-| `toolzone_sk` | ToolZone (own) | Manufacturer-page crawl · JSON-LD |
+| `toolzone_sk` | ToolZone (own) | Sitemap full-catalogue crawl · JSON-LD |
 | `madmat_sk` | Madmat | Heureka XML feed |
 | `centrumnaradia_sk` | Centrum Naradia | Heureka XML feed |
-| `boukal_cz` | Boukal (CZ) | Brand-page pagination · JSON-LD |
+| `fermatshop_sk` | Fermatshop | Sitemap full-catalogue crawl |
+| `strendpro_sk` | Strendpro | Category + pagination full-catalogue crawl |
+| `boukal_cz` | Boukal (CZ) | Feed discovery first · JS-rendered fallback |
 | `bo_import_cz` | BO-Import (CZ) | Manufacturer-page crawl · JSON-LD · CZK→EUR |
 | `agi_sk` | AGI | Manufacturer-page crawl · JSON-LD |
 | `ahprofi_sk` | AH Profi | Search-by-MPN |
@@ -91,8 +100,12 @@ python jobs/daily_scrape.py
 # One competitor only
 python jobs/daily_scrape.py --only agi_sk
 
+# Full-catalogue crawlers
+python jobs/daily_scrape.py --only fermatshop_sk
+python jobs/daily_scrape.py --only strendpro_sk
+
 # Multiple competitors
-python jobs/daily_scrape.py --only boukal_cz bo_import_cz madmat_sk
+python jobs/daily_scrape.py --only boukal_cz bo_import_cz madmat_sk fermatshop_sk
 
 # Different catalogue file
 python jobs/daily_scrape.py --catalogue data/my_catalogue.csv
@@ -112,7 +125,9 @@ python jobs/daily_scrape.py --catalogue data/my_catalogue.csv
 
 ## Matching
 
-Links scraped competitor listings to ToolZone reference products. Layers run in order — first match wins.
+`jobs/match_products.py` links scraped competitor listings to ToolZone
+reference listings and writes the results to `listing_matches`. Layers run in
+order and the first hit wins.
 
 ```
 Layer  Type                Trigger                              Confidence
@@ -120,12 +135,17 @@ Layer  Type                Trigger                              Confidence
   1    exact_ean           EAN barcode identical                  1.00
   2    exact_mpn           Brand + MPN both match                 1.00
   3    mpn_no_brand        MPN matches, listing has no brand      0.90
-  4    regex_ean_title     EAN-13 extracted from title            0.93
-  5    regex_mpn_title     MPN from title + brand agrees          0.90
-  6    regex_mpn_no_brand  MPN from title, brand absent           0.72–0.78
-  7*   llm_fuzzy           gpt-5-nano verifies vector candidates  0.75–0.84
+  4    regex_ean           EAN extracted from listing title       0.95
+  5*   llm_fuzzy           vector top-40 + gpt-5-nano verify      0.85
        * opt-in via --llm flag, requires OPENAI_API_KEY
 ```
+
+Notes:
+- The current LLM matcher narrows candidates locally with multilingual vector
+  search, then sends up to 40 ToolZone candidates to OpenAI for verification.
+- Default OpenAI model is `gpt-5-nano`.
+- ToolZone is the reference catalogue for `match_products.py`; `--only` limits
+  the competitor side, not the ToolZone side.
 
 ### By manufacturer and/or competitor
 
@@ -160,6 +180,18 @@ python jobs/match_products.py --manufacturer knipex --force --llm
 | `--force` | off | Re-match listings that already have a match |
 | `--no-report` | off | Skip the price-comparison table at the end |
 
+### Legacy matching
+
+`jobs/old_match_products.py` keeps the pre-vector LLM behavior with the same
+flags and DB output as `jobs/match_products.py`. Use it when you want to
+compare the current vector-backed matcher against the older
+brand/title-token pre-filter.
+
+```bash
+python jobs/old_match_products.py --manufacturer knipex --llm
+python jobs/old_match_products.py --only agi_sk boukal_cz --llm
+```
+
 ---
 
 ## Common Workflows
@@ -176,11 +208,15 @@ python jobs/match_products.py --manufacturer knipex --only agi_sk --llm
 python jobs/daily_scrape.py --manufacturer knipex --only toolzone_sk naradieshop_sk
 python jobs/match_products.py --manufacturer knipex --only naradieshop_sk --llm
 
-# ── Full daily run (all brands, all competitors) ──────────────────────────
+# ── Full monthly run (all brands, all competitors) ────────────────────────
 python jobs/daily_scrape.py
 python jobs/match_products.py --llm
 python jobs/daily_recommend.py
 python jobs/daily_alert.py
+
+# ── Compare current matcher vs legacy matcher ──────────────────────────────
+python jobs/match_products.py --only agi_sk boukal_cz --llm
+python jobs/old_match_products.py --only agi_sk boukal_cz --llm
 ```
 
 ---
@@ -201,6 +237,17 @@ python jobs/daily_recommend.py                       # no flags
 ```bash
 python jobs/daily_alert.py                           # silent if ALERT_WEBHOOK_URL not set
 ```
+
+### `old_match_products.py` — Legacy ToolZone matcher
+```bash
+python jobs/old_match_products.py --manufacturer knipex --llm
+python jobs/old_match_products.py --only agi_sk boukal_cz --llm
+```
+
+Uses the older LLM candidate selection path:
+- same CLI flags as `match_products.py`
+- same `listing_matches` output table
+- brand/title-token pre-filter before LLM verification
 
 ### `export_manufacturer.py` — Export manufacturer comparison to Excel
 
@@ -247,6 +294,44 @@ python jobs/manufacturer_scrape.py --manufacturer knipex
 python jobs/manufacturer_scrape.py --list-manufacturers   # see all available slugs
 ```
 
+### `enrich_allegro_eans.py` — Backfill missing AG EANs from Allegro
+
+Reads an Allegro Excel export or normalized CSV, matches rows against AG
+`products` with missing EANs, and writes confirmed EANs back into
+`products.ean`.
+
+```bash
+# Default Excel input + LLM verification for ambiguous rows
+python jobs/enrich_allegro_eans.py --input "item-analysis/Allegro zalistované položky 42026.xlsx" --llm
+
+# Dry run + report only
+python jobs/enrich_allegro_eans.py --dry-run --report reports/allegro_backfill_preview.csv
+
+# Small validation batch
+python jobs/enrich_allegro_eans.py --llm --limit 200 --batch-size 50
+```
+
+Behavior:
+- reads `.xlsx` or normalized `.csv` input
+- updates `products.ean` only when the current DB value is empty
+- uses strict exact-title / vector checks before optional LLM fallback
+- commits updates in batches and flushes buffered updates on interrupt
+- uses up to 40 candidates for the LLM fallback and accepts confidence `>= 0.85`
+- writes a per-row report to `reports/allegro_ean_backfill_YYYY-MM-DD.csv` by default
+
+### Allegro sidecar scripts
+
+The `item-analysis/` directory contains browser/Excel-based Allegro utilities
+that are separate from the main backend pipeline:
+
+```bash
+# Normalise Allegro Excel export into CSV
+python item-analysis/read_allegro_eans.py
+
+# Load scraped Allegro offers into the DB
+python item-analysis/load_allegro_offers.py
+```
+
 ---
 
 ## Dashboard
@@ -259,14 +344,14 @@ Tabs: **Product Search** · **Price Compare** · **By Manufacturer** · **Covera
 
 ---
 
-## Cron (overnight full run)
+## Cron (monthly full run)
 
 ```cron
-00 01 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_ingest.py
-00 02 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_scrape.py
-00 04 * * *  cd /path/to/repo && .venv/bin/python jobs/match_products.py --llm
-00 05 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_recommend.py
-30 05 * * *  cd /path/to/repo && .venv/bin/python jobs/daily_alert.py
+00 01 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_ingest.py
+00 02 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_scrape.py
+00 04 1 * *  cd /path/to/repo && .venv/bin/python jobs/match_products.py --llm
+00 05 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_recommend.py
+30 05 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_alert.py
 ```
 
 ---

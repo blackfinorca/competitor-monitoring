@@ -154,7 +154,7 @@ try:
     _llm_status = str(_llm_client_check) if _llm_client_check else "disabled (no OPENAI_API_KEY)"
 except Exception:
     _llm_status = "disabled (no OPENAI_API_KEY)"
-st.caption(f"ToolZone Pricing  ·  Today: {date.today().isoformat()}  ·  LLM: {_llm_status}")
+st.caption(f"ToolZone Pricing  ·  Cycle: 1 month  ·  As of: {date.today().isoformat()}  ·  LLM: {_llm_status}")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 Product Search", "💰 Price compare", "🏭 By Manufacturer",
@@ -170,7 +170,7 @@ def _render_search_tab() -> None:
     st.header("Product Search")
     st.caption(
         "Enter an EAN, MPN, or product name. "
-        "Cached results (< 24 h) load instantly; everything else is fetched live."
+        "Cached results (< 30 days) load instantly; everything else is fetched live."
     )
 
     # --- Search form ---------------------------------------------------------
@@ -306,12 +306,13 @@ def _render_search_tab() -> None:
             ts = pd.Timestamp(tz_row.scraped_at).tz_localize(None)
             delta = pd.Timestamp.utcnow().tz_localize(None) - ts
             hours = int(delta.total_seconds() / 3600)
-            if hours < 26:
-                freshness = f"🟢 {hours}h ago"
-            elif hours < 50:
-                freshness = f"🟡 {hours}h ago"
+            days = max(hours // 24, 0)
+            if days < 31:
+                freshness = f"🟢 {days}d ago" if days else f"🟢 {hours}h ago"
+            elif days < 45:
+                freshness = f"🟡 {days}d ago"
             else:
-                freshness = f"🔴 {hours // 24}d ago"
+                freshness = f"🔴 {days}d ago"
             st.caption(f"Scraped {freshness}")
 
         # Market position from latest snapshot
@@ -881,22 +882,20 @@ order — the first layer that fires wins. Higher confidence = stronger evidence
 | 1 | `exact_ean` | EAN barcode identical on both sides | **1.00** |
 | 2 | `exact_mpn` | Brand + MPN both match (normalised) | **1.00** |
 | 3 | `mpn_no_brand` | MPN matches; listing has no brand field | **0.90** |
-| 4 | `regex_ean_title` | EAN-13 extracted from listing title matches | **0.93** |
-| 5 | `regex_mpn_title` | MPN extracted from title + brand agrees | **0.90** |
-| 6 | `regex_mpn_no_brand` | MPN extracted from title; brand absent or mismatched | **0.72–0.78** |
-| 7 *(opt-in)* | `llm_fuzzy` | gpt-5-nano title/spec similarity after vector retrieval | **0.75–0.84** |
+| 4 | `regex_ean` | EAN extracted from listing title matches | **0.95** |
+| 5 *(opt-in)* | `llm_fuzzy` | gpt-5-nano title/spec similarity after vector retrieval | **≥ 0.85** |
 
-**LLM candidate retrieval** (layer 7): before calling the API, local vector search narrows each listing to
-up to 20 ToolZone products. The LLM then verifies the best match from that candidate set.
+**LLM candidate retrieval** (layer 5): before calling the API, local vector search narrows each listing to
+up to 40 ToolZone products. The LLM then verifies the best match from that candidate set.
 
 **Normalisation**: MPN comparison strips spaces, dashes, and lowercases both sides
 (e.g. `87-01-250` = `8701250`). Brand comparison collapses accents and common
 abbreviations (e.g. `knipex` = `KNIPEX`).
 
 **Confidence thresholds used elsewhere**:
-- Price Compare and recommendations: `≥ 0.85` (layers 1–5 high-confidence only)
+- Price Compare and recommendations: `≥ 0.85`
 - Coverage Health match rate: `≥ 0.72` (all deterministic layers) — shows what % of a competitor's scraped listings were matched to a ToolZone product
-- LLM layer default accept: `≥ 0.75` (overridable with `--min-confidence`)
+- LLM layer default accept: `≥ 0.85`
 """)
 
     # Coverage notes
@@ -1412,44 +1411,63 @@ def _load_comparison_data(ref_id: str, opp_ids: tuple[str, ...], min_confidence:
 
 
 def _generate_insights(data: dict, ref_name: str, opp_ids: list[str]) -> str:
-    import json as _json
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return "No OPENAI_API_KEY configured."
 
     from agnaradie_pricing.matching.llm_matcher import OpenAIClient
-    client = OpenAIClient(api_key=api_key, model="gpt-4.1-mini", max_tokens=512)
+    from agnaradie_pricing.pricing.compare_competitors_insights import build_compare_competitors_insights_prompt
 
-    opponents_payload = []
-    for opp_id in opp_ids:
-        od = data["per_opp"][opp_id]
-        opponents_payload.append({
-            "name":                  _display_name(opp_id),
-            "products_compared":     od["total"],
-            "ref_cheaper_pct":       od["ref_cheaper_pct"],
-            "avg_advantage_pct":     od["avg_advantage_pct"],
-            "avg_disadvantage_pct":  abs(od["avg_disadvantage_pct"]),
-            "top_brands": [
-                {"brand": b["brand"], "ref_wins_pct": b["ref_wins_pct"], "avg_delta": b["avg_delta_pct"]}
-                for b in od["by_brand"][:3]
-            ],
-        })
-
-    payload = {
-        "reference_store":  ref_name,
-        "opponents":        opponents_payload,
-        "brand_overview":   [
-            {"brand": b["brand"], "products": b["count"], "avg_delta_pct": b["avg_delta_pct"]}
-            for b in data["brand_summary"][:5]
-        ],
-    }
-
-    prompt = f"""You are a pricing analyst for a Slovak hardware store. Analyse the multi-competitor price comparison data below and write exactly 4–5 bullet-point insights. Be specific with numbers and competitor names. Flag both strengths and weaknesses. Keep each bullet under 30 words. Output ONLY the bullets starting with "•", no headings or intro text.
-
-Data:
-{_json.dumps(payload, indent=2)}"""
-
+    client = OpenAIClient(api_key=api_key, model="gpt-4.1-mini", max_tokens=1800)
+    opponents = [(opp_id, _display_name(opp_id)) for opp_id in opp_ids]
+    prompt = build_compare_competitors_insights_prompt(
+        data,
+        ref_name=ref_name,
+        opponents=opponents,
+    )
     return client.complete(prompt)
+
+
+def _available_compare_brands(rows: list[dict]) -> list[str]:
+    return sorted({(row.get("brand") or "").strip() for row in rows if (row.get("brand") or "").strip()})
+
+
+def _compare_brand_match_counts(rows: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        brand = (row.get("brand") or "").strip()
+        if not brand:
+            continue
+        counts[brand] = counts.get(brand, 0) + 1
+    return counts
+
+
+def _toggle_compare_brand_selection(selected_brands: list[str], brand: str) -> list[str]:
+    current = list(selected_brands)
+    if brand in current:
+        return [item for item in current if item != brand]
+    return sorted([*current, brand])
+
+
+def _filter_compare_rows(
+    rows: list[dict],
+    *,
+    filter_opt: str,
+    selected_brands: list[str] | None,
+    n_opp: int,
+) -> list[dict]:
+    if "Stronger" in filter_opt:
+        filtered = [row for row in rows if row["wins"] == n_opp]
+    elif "Weaker" in filter_opt:
+        filtered = [row for row in rows if row["wins"] == 0]
+    else:
+        filtered = rows
+
+    if selected_brands is not None:
+        allowed_brands = set(selected_brands)
+        filtered = [row for row in filtered if row.get("brand") in allowed_brands]
+
+    return filtered
 
 
 def _render_compare_tab() -> None:
@@ -1539,12 +1557,54 @@ def _render_compare_tab() -> None:
     )
 
     n_opp = len(opp_ids_list)
-    if "Stronger" in filter_opt:
-        display_rows = [m for m in merged if m["wins"] == n_opp]
-    elif "Weaker" in filter_opt:
-        display_rows = [m for m in merged if m["wins"] == 0]
+    brand_options = _available_compare_brands(merged)
+    brand_counts = _compare_brand_match_counts(merged)
+    brand_state_key = f"cc_brands_{ref_id}_{'_'.join(sorted(opp_ids_list))}_{min_conf}"
+    if brand_state_key not in st.session_state:
+        st.session_state[brand_state_key] = list(brand_options)
     else:
-        display_rows = merged
+        st.session_state[brand_state_key] = [
+            brand for brand in st.session_state[brand_state_key]
+            if brand in brand_options
+        ]
+
+    selected_brands = list(st.session_state[brand_state_key])
+
+    st.caption("Brands")
+    action_col1, action_col2 = st.columns([1, 1])
+    with action_col1:
+        if st.button("Select all", use_container_width=True, key=f"{brand_state_key}_all"):
+            st.session_state[brand_state_key] = list(brand_options)
+            st.rerun()
+    with action_col2:
+        if st.button("Deselect all", use_container_width=True, key=f"{brand_state_key}_none"):
+            st.session_state[brand_state_key] = []
+            st.rerun()
+
+    brand_button_cols = st.columns(min(6, len(brand_options)) or 1)
+    for idx, brand in enumerate(brand_options):
+        is_selected = brand in selected_brands
+        label = f"{brand} ({brand_counts.get(brand, 0)})"
+        with brand_button_cols[idx % len(brand_button_cols)]:
+            if st.button(
+                label,
+                key=f"{brand_state_key}_{idx}",
+                type="primary" if is_selected else "secondary",
+                use_container_width=False,
+            ):
+                st.session_state[brand_state_key] = _toggle_compare_brand_selection(selected_brands, brand)
+                st.rerun()
+
+    display_rows = _filter_compare_rows(
+        merged,
+        filter_opt=filter_opt,
+        selected_brands=None if set(selected_brands) == set(brand_options) else selected_brands,
+        n_opp=n_opp,
+    )
+
+    if not display_rows:
+        st.info("No products match the current show/brand filters.")
+        return
 
     table_data = []
     col_cfg: dict = {}
