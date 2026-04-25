@@ -252,50 +252,8 @@ async def scrape_ean(page, ean: str) -> list[dict]:
     return offers
 
 
-class _TurnController:
-    def __init__(self, worker_ids: list[int]) -> None:
-        self.worker_ids = worker_ids
-        self.active_workers = set(worker_ids)
-        self.current_turn = worker_ids[0]
-        self._events = {worker_id: asyncio.Event() for worker_id in worker_ids}
-        self._events[self.current_turn].set()
-
-    async def wait_for_turn(self, worker_id: int) -> None:
-        await self._events[worker_id].wait()
-
-    def handoff(self, worker_id: int) -> None:
-        if worker_id not in self.active_workers or self.current_turn != worker_id:
-            return
-        next_worker = self._next_active_worker_after(worker_id)
-        if next_worker is None:
-            return
-        self._events[worker_id].clear()
-        self.current_turn = next_worker
-        self._events[next_worker].set()
-
-    def mark_inactive(self, worker_id: int) -> None:
-        if worker_id not in self.active_workers:
-            return
-        self.active_workers.remove(worker_id)
-        self._events[worker_id].clear()
-        if not self.active_workers:
-            return
-        if self.current_turn == worker_id:
-            next_worker = self._next_active_worker_after(worker_id)
-            if next_worker is not None:
-                self.current_turn = next_worker
-                self._events[next_worker].set()
-
-    def _next_active_worker_after(self, worker_id: int) -> int | None:
-        if not self.active_workers:
-            return None
-        start_idx = self.worker_ids.index(worker_id)
-        total = len(self.worker_ids)
-        for offset in range(1, total + 1):
-            candidate = self.worker_ids[(start_idx + offset) % total]
-            if candidate in self.active_workers:
-                return candidate
-        return None
+def _worker_startup_stagger_seconds(worker_id: int) -> float:
+    return float(max(worker_id, 0))
 
 
 async def _worker(
@@ -309,16 +267,17 @@ async def _worker(
     total: int,
     output_path: str,
     started_at: float,
-    turn_controller: _TurnController,
 ) -> None:
     next_long_pause = random.randint(8, 15)
     idx = 0
+    startup_stagger = _worker_startup_stagger_seconds(worker_id)
+    if startup_stagger > 0:
+        print(f"[W{worker_id}] startup stagger {startup_stagger:.1f}s", flush=True)
+        await asyncio.sleep(startup_stagger)
     while True:
-        await turn_controller.wait_for_turn(worker_id)
         try:
             ean = queue.get_nowait()
         except asyncio.QueueEmpty:
-            turn_controller.mark_inactive(worker_id)
             break
 
         offers = await scrape_ean(page, ean)
@@ -337,7 +296,6 @@ async def _worker(
 
         queue.task_done()
         idx += 1
-        turn_controller.handoff(worker_id)
 
         post = random.uniform(2.0, 5.0)
         print(f"[W{worker_id}] rest {post:.1f}s", flush=True)
@@ -551,7 +509,6 @@ async def run(
 
         write_lock = asyncio.Lock()
         counters = {"total": 0, "not_found": 0, "done": 0, "scraped_eans": 0}
-        turn_controller = _TurnController(list(range(n_workers)))
 
         tasks = [
             asyncio.create_task(
@@ -566,7 +523,6 @@ async def run(
                     len(eans),
                     output_path,
                     started_at,
-                    turn_controller,
                 )
             )
             for i in range(n_workers)
