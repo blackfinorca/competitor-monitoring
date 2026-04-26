@@ -161,6 +161,12 @@ _EAN_RE = re.compile(r'itemprop="gtin13"\s*>\s*(\d{8,13})\s*<')
 _PRODUCT_ID_RE = re.compile(r'itemprop="productID"\s*>\s*([^\s<]+)\s*<')
 _PRICE_RE = re.compile(r'itemprop="price"\s+content="([\d.]+)"')
 _AVAIL_RE = re.compile(r'itemprop="availability"[^>]*href="([^"]+)"')
+_BRAND_RE = re.compile(
+    r'<div id="product-codes"[^>]*>.*?'
+    r'<span class="col col-5 label">Výrobca&nbsp;</span>'
+    r'<span class="col col-7 right">\s*<a[^>]*>([^<]+)</a>',
+    re.S,
+)
 
 
 def _parse_product_page(
@@ -184,6 +190,7 @@ def _parse_product_page(
     ean_m = _EAN_RE.search(html)
     pid_m = _PRODUCT_ID_RE.search(html)
     avail_m = _AVAIL_RE.search(html)
+    brand_m = _BRAND_RE.search(html)
 
     in_stock: bool | None = None
     if avail_m:
@@ -192,7 +199,7 @@ def _parse_product_page(
     return CompetitorListing(
         competitor_id=competitor_id,
         competitor_sku=pid_m.group(1) if pid_m else None,
-        brand=None,
+        brand=brand_m.group(1).strip() if brand_m else None,
         mpn=pid_m.group(1) if pid_m else None,
         ean=ean_m.group(1) if ean_m else None,
         title=title,
