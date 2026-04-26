@@ -1,15 +1,10 @@
 """Tests for the AH Profi scraper."""
 
+import re
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from agnaradie_pricing.scrapers.ahprofi import (
-    AhProfiScraper,
-    _parse_first_product,
-    _parse_price,
-)
+from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper, _parse_product_page
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ahprofi_search.html"
 
@@ -19,39 +14,25 @@ def _fixture_html() -> str:
 
 
 class TestAhProfiParser:
-    def test_parse_returns_first_product_from_fixture(self):
+    def test_parse_product_page_from_fixture(self):
         html = _fixture_html()
-        result = _parse_first_product(html, "https://www.ahprofi.sk", "ahprofi_sk")
+        html = re.sub(
+            r'(<span class="col col-7 right"><a href="https://www\.ahprofi\.sk/knipex">)Knipex(</a></span>)',
+            r"\1MAGICBRAND\2",
+            html,
+        )
+        result = _parse_product_page(html, "ahprofi_sk", "https://www.ahprofi.sk/produkt")
         assert result is not None
         assert result.competitor_id == "ahprofi_sk"
-        assert result.title
-        assert len(result.title) > 5
-        assert result.price_eur > 0
+        assert result.title == "SIKA kliešte KNIPEX Cobra 250 mm - 8711250"
+        assert result.brand == "MAGICBRAND"
+        assert result.ean == "4003773035473"
+        assert result.price_eur == 33.44
         assert result.currency == "EUR"
 
-    def test_parse_product_has_url(self):
-        html = _fixture_html()
-        result = _parse_first_product(html, "https://www.ahprofi.sk", "ahprofi_sk")
-        assert result is not None
-        assert result.url.startswith("https://www.ahprofi.sk")
-
-    def test_parse_product_mpn_from_user_code(self):
-        html = _fixture_html()
-        result = _parse_first_product(html, "https://www.ahprofi.sk", "ahprofi_sk")
-        assert result is not None
-        # user_code span contains the product code / MPN
-        assert result.mpn is not None
-        assert len(result.mpn) >= 4
-
     def test_parse_empty_html_returns_none(self):
-        result = _parse_first_product("<html><body></body></html>", "https://www.ahprofi.sk", "ahprofi_sk")
+        result = _parse_product_page("<html><body></body></html>", "ahprofi_sk", "https://www.ahprofi.sk/produkt")
         assert result is None
-
-    def test_parse_price_euro_format(self):
-        assert _parse_price("€\xa019,25") == pytest.approx(19.25)
-        assert _parse_price("19,25") == pytest.approx(19.25)
-        assert _parse_price("€ 29,71") == pytest.approx(29.71)
-        assert _parse_price("119.90") == pytest.approx(119.90)
 
 
 class TestAhProfiScraper:
@@ -83,6 +64,6 @@ class TestAhProfiScraper:
         assert "vysledky-vyhladavania" in search_call[0][0]
         params = search_call[1]["params"]
         assert "search_keyword" in params
-        assert "KNIPEX" in params["search_keyword"]
-        # Dashes should be replaced with spaces in the MPN
+        assert params["search_keyword"] == "8701250"
+        # Search input should be the condensed MPN only.
         assert "-" not in params["search_keyword"]

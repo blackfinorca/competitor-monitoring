@@ -1,4 +1,33 @@
-from agnaradie_pricing.scrapers.rebiop import REBIOP_CONFIG, RebiopScraper
+from agnaradie_pricing.scrapers.rebiop import REBIOP_CONFIG, RebiopScraper, _parse_detail_page
+
+
+def test_rebiop_parse_detail_page_extracts_brand_field() -> None:
+    detail_html = """
+    <html>
+      <body>
+        <nav aria-label="brands">KNIPEX | Milwaukee | Bosch</nav>
+        <meta name="keywords" content="KNIPEX, Milwaukee, BOSCH">
+        <h1>Blankovací nôž so slzou BK-01</h1>
+        <div class="detail-product-info">
+          <dl><dt>Značka:</dt><dd>BAUPRO</dd></dl>
+          <dl><dt>EAN kód:</dt><dd>8585033303677</dd></dl>
+          <dl><dt>Kód:</dt><dd>3.40010</dd></dl>
+          <dl class="detail-product-info-price"><dt>Cena s DPH</dt><dd>30,79 €</dd></dl>
+          <dl><dt>Dostupnosť:</dt><dd>Skladom</dd></dl>
+        </div>
+      </body>
+    </html>
+    """
+
+    listing = _parse_detail_page(
+        detail_html,
+        "rebiop_sk",
+        "https://www.rebiop.sk/detail/4853/blankovaci-noz-so-slzou-bk-01",
+    )
+
+    assert listing is not None
+    assert listing.brand == "BAUPRO"
+    assert listing.ean == "8585033303677"
 
 
 def test_rebiop_search_by_query_fetches_detail_page_for_ean(monkeypatch) -> None:
@@ -16,6 +45,7 @@ def test_rebiop_search_by_query_fetches_detail_page_for_ean(monkeypatch) -> None
       <body>
         <h1>Blankovací nôž so slzou BK-01</h1>
         <div class="detail-product-info">
+          <dl><dt>Značka:</dt><dd>BAUPRO</dd></dl>
           <dl><dt>EAN kód:</dt><dd>8585033303677</dd></dl>
           <dl><dt>Kód:</dt><dd>3.40010</dd></dl>
           <dl class="detail-product-info-price"><dt>Cena s DPH</dt><dd>30,79 €</dd></dl>
@@ -57,6 +87,7 @@ def test_rebiop_search_by_query_fetches_detail_page_for_ean(monkeypatch) -> None
 
     assert listing is not None
     assert listing.url == "https://www.rebiop.sk/detail/4853/blankovaci-noz-so-slzou-bk-01"
+    assert listing.brand == "BAUPRO"
     assert listing.ean == "8585033303677"
     assert listing.competitor_sku == "3.40010"
     assert seen_urls == [
