@@ -46,6 +46,8 @@ _CDP_URL = "http://localhost:9222"
 _BASE_URL = "https://allegro.sk"
 _FIELDNAMES = ["ean", "title", "seller", "seller_url", "price_eur", "delivery_eur", "box_price_eur", "scraped_at"]
 _COOKIE_FILE = "item-analysis/allegro_cookies.json"
+_TIMING_JITTER_MIN = 0.09
+_TIMING_JITTER_MAX = 0.11
 
 # JS to extract all offer articles from the product page.
 # Skips articles that live inside "Najrýchlejšie" or "Najlacnejšie" sections.
@@ -135,6 +137,18 @@ def _looks_like_all_offers_label(text: str) -> bool:
     return "všetky" in normalized and "ponuky" in normalized
 
 
+def _jitter_timing(value: float) -> float:
+    sign = -1 if random.random() < 0.5 else 1
+    percent = _TIMING_JITTER_MIN + random.random() * (
+        _TIMING_JITTER_MAX - _TIMING_JITTER_MIN
+    )
+    return round(value * (1 + sign * percent), 6)
+
+
+def _jitter_timeout_ms(value: int) -> int:
+    return int(round(_jitter_timing(float(value))))
+
+
 async def _click_all_offers_control(page) -> bool:
     controls = page.locator("button, a")
     count = await controls.count()
@@ -153,7 +167,7 @@ async def scrape_ean(page, ean: str) -> list[dict]:
         await page.goto(
             f"{_BASE_URL}/vyhladavanie?string={ean}",
             wait_until="domcontentloaded",
-            timeout=20_000,
+            timeout=_jitter_timeout_ms(20_000),
         )
     except Exception as e:
         log.debug("search timeout for %s: %s", ean, e)
@@ -165,7 +179,10 @@ async def scrape_ean(page, ean: str) -> list[dict]:
     else:
         # Product links are rendered by JS — wait for them before querying
         try:
-            await page.wait_for_selector('a[href*="/produkt/"]', timeout=10_000)
+            await page.wait_for_selector(
+                'a[href*="/produkt/"]',
+                timeout=_jitter_timeout_ms(10_000),
+            )
         except Exception:
             pass  # fall through to oferta/ fallback below
 
@@ -178,7 +195,10 @@ async def scrape_ean(page, ean: str) -> list[dict]:
 
         if not product_links:
             try:
-                await page.wait_for_selector('a[href*="/oferta/"]', timeout=5_000)
+                await page.wait_for_selector(
+                    'a[href*="/oferta/"]',
+                    timeout=_jitter_timeout_ms(5_000),
+                )
                 product_links = await page.eval_on_selector_all(
                     'a[href*="/oferta/"]', "els => els.map(e => e.href)"
                 )
@@ -192,7 +212,11 @@ async def scrape_ean(page, ean: str) -> list[dict]:
 
     if "/oferta/" in product_url and "/produkt/" not in product_url:
         try:
-            await page.goto(product_url.split("#")[0], wait_until="domcontentloaded", timeout=20_000)
+            await page.goto(
+                product_url.split("#")[0],
+                wait_until="domcontentloaded",
+                timeout=_jitter_timeout_ms(20_000),
+            )
             parent_links = await page.eval_on_selector_all(
                 'a[href*="/produkt/"]', "els => els.map(e => e.href)"
             )
@@ -202,20 +226,24 @@ async def scrape_ean(page, ean: str) -> list[dict]:
             log.debug("oferta redirect for %s: %s", ean, e)
 
     try:
-        await page.goto(product_url, wait_until="domcontentloaded", timeout=20_000)
+        await page.goto(
+            product_url,
+            wait_until="domcontentloaded",
+            timeout=_jitter_timeout_ms(20_000),
+        )
 
         # Click only the "Všetky ponuky" control, not other "Všetky ..." sections.
         try:
             clicked = await _click_all_offers_control(page)
             if clicked:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(_jitter_timing(1.5))
         except Exception:
             pass
 
         # Reviews appear first — wait specifically for offer articles which contain "Predajca:"
         await page.wait_for_function(
             "() => [...document.querySelectorAll('article')].some(a => a.innerText.includes('Predajca:'))",
-            timeout=20_000,
+            timeout=_jitter_timeout_ms(20_000),
         )
     except Exception as e:
         log.debug("product page timeout for %s: %s", ean, e)
@@ -272,7 +300,7 @@ async def _worker(
     startup_stagger = _worker_startup_stagger_seconds(worker_id)
     if startup_stagger > 0:
         print(f"[W{worker_id}] startup stagger {startup_stagger:.1f}s", flush=True)
-        await asyncio.sleep(startup_stagger)
+        await asyncio.sleep(_jitter_timing(startup_stagger))
     while True:
         try:
             ean = queue.get_nowait()
@@ -296,12 +324,12 @@ async def _worker(
         queue.task_done()
         idx += 1
 
-        post = random.uniform(2.0, 5.0)
+        post = _jitter_timing(random.uniform(2.0, 5.0))
         print(f"[W{worker_id}] rest {post:.1f}s", flush=True)
         await asyncio.sleep(post)
 
         if idx > 0 and idx % next_long_pause == 0:
-            pause = random.uniform(20.0, 30.0)
+            pause = _jitter_timing(random.uniform(20.0, 30.0))
             elapsed_seconds = time.monotonic() - started_at
             print(
                 f"[W{worker_id}] {_format_progress_snapshot(counters=counters, total=total, elapsed_seconds=elapsed_seconds)}",
@@ -602,7 +630,7 @@ def main() -> None:
     chrome_proc = None
     if args.launch_chrome:
         chrome_proc = _launch_chrome(9222)
-        time.sleep(3)  # wait for Chrome to start
+        time.sleep(_jitter_timing(3))  # wait for Chrome to start
 
     try:
         sys.exit(asyncio.run(run(

@@ -131,6 +131,44 @@ def test_worker_startup_stagger_seconds() -> None:
     assert module._worker_startup_stagger_seconds(2) == 2.0
 
 
+def test_jitter_timing_applies_positive_about_ten_percent() -> None:
+    module = _load_scrape_allegro_module()
+
+    original_random = module.random.random
+    try:
+        values = iter([0.75, 0.5])
+        module.random.random = lambda: next(values)
+
+        assert module._jitter_timing(100.0) == 110.0
+    finally:
+        module.random.random = original_random
+
+
+def test_jitter_timing_applies_negative_about_ten_percent() -> None:
+    module = _load_scrape_allegro_module()
+
+    original_random = module.random.random
+    try:
+        values = iter([0.25, 1.0])
+        module.random.random = lambda: next(values)
+
+        assert module._jitter_timing(100.0) == 89.0
+    finally:
+        module.random.random = original_random
+
+
+def test_jitter_timeout_ms_returns_integer_timeout() -> None:
+    module = _load_scrape_allegro_module()
+
+    original_jitter = module._jitter_timing
+    try:
+        module._jitter_timing = lambda value: value * 1.1
+
+        assert module._jitter_timeout_ms(20_000) == 22_000
+    finally:
+        module._jitter_timing = original_jitter
+
+
 def test_worker_applies_initial_stagger_before_first_scrape() -> None:
     module = _load_scrape_allegro_module()
     queue: asyncio.Queue[str] = asyncio.Queue()
@@ -163,11 +201,13 @@ def test_worker_applies_initial_stagger_before_first_scrape() -> None:
     original_scrape = module.scrape_ean
     original_persist = module._persist_offers_batch
     original_uniform = module.random.uniform
+    original_jitter = module._jitter_timing
     try:
         module.asyncio.sleep = fake_sleep
         module.scrape_ean = fake_scrape
         module._persist_offers_batch = fake_persist
         module.random.uniform = lambda _lo, _hi: 2.0
+        module._jitter_timing = lambda value: value
 
         async def scenario() -> None:
             await module._worker(
@@ -189,6 +229,7 @@ def test_worker_applies_initial_stagger_before_first_scrape() -> None:
         module.scrape_ean = original_scrape
         module._persist_offers_batch = original_persist
         module.random.uniform = original_uniform
+        module._jitter_timing = original_jitter
 
     assert sleep_calls[0] == 1.0
     assert scraped_eans == ["123"]
