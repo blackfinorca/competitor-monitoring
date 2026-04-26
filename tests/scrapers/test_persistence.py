@@ -130,6 +130,48 @@ def test_save_competitor_listings_backfills_brand_from_products_ean() -> None:
     assert row.brand == "KNIPEX"
 
 
+def test_save_competitor_listings_treats_blank_brand_as_missing() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    product = ProductRow(
+        sku="p-4003773012345",
+        brand="KNIPEX",
+        mpn="8701250",
+        ean="4003773012345",
+        title="KNIPEX Kliešte Cobra 8701250",
+        category=None,
+        price_eur=None,
+        cost_eur=None,
+        stock=None,
+    )
+    listing = CompetitorListing(
+        competitor_id="ahprofi_sk",
+        competitor_sku="8711250",
+        brand=" ",
+        mpn="8701250",
+        ean="4003773012345",
+        title="Kliešte Cobra 8701250",
+        price_eur=33.44,
+        currency="EUR",
+        in_stock=True,
+        url="https://www.ahprofi.sk/produkt/8711250",
+        scraped_at=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+
+    with Session(engine) as session:
+        session.add(product)
+        session.commit()
+        save_competitor_listings(session, [listing])
+        session.commit()
+        row = session.scalar(
+            select(CompetitorListingRow).where(CompetitorListingRow.url == listing.url)
+        )
+
+    assert row is not None
+    assert row.brand == "KNIPEX"
+
+
 def test_save_competitor_listings_backfills_brand_from_existing_listing_ean() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -173,3 +215,89 @@ def test_save_competitor_listings_backfills_brand_from_existing_listing_ean() ->
     assert row is not None
     assert row.ean == "8585033303677"
     assert row.brand == "BAUPRO"
+
+
+def test_save_competitor_listings_does_not_backfill_brand_for_placeholder_ean() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    existing = CompetitorListingRow(
+        competitor_id="fermatshop_sk",
+        competitor_sku="3805894",
+        brand="Milwaukee",
+        mpn="4933447836",
+        ean="NOEAN-3805894",
+        title="Kompaktny vrtaci skrutkovac",
+        price_eur=Decimal("299.27"),
+        currency="EUR",
+        in_stock=True,
+        url="https://www.fermatshop.sk/akumulatorove-naradie/product-a/",
+        scraped_at=datetime(2026, 4, 24, tzinfo=UTC),
+    )
+    listing = CompetitorListing(
+        competitor_id="ahprofi_sk",
+        competitor_sku="8711250",
+        brand=None,
+        mpn="8701250",
+        ean="NOEAN-3805894",
+        title="Kliešte Cobra 8701250",
+        price_eur=33.44,
+        currency="EUR",
+        in_stock=True,
+        url="https://www.ahprofi.sk/produkt/8711250",
+        scraped_at=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+
+    with Session(engine) as session:
+        session.add(existing)
+        session.commit()
+        save_competitor_listings(session, [listing])
+        session.commit()
+        row = session.scalar(
+            select(CompetitorListingRow).where(CompetitorListingRow.url == listing.url)
+        )
+
+    assert row is not None
+    assert row.brand is None
+
+
+def test_save_competitor_listings_does_not_backfill_brand_for_short_numeric_ean() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    product = ProductRow(
+        sku="p-123",
+        brand="KNIPEX",
+        mpn="8701250",
+        ean="123",
+        title="KNIPEX Kliešte Cobra 8701250",
+        category=None,
+        price_eur=None,
+        cost_eur=None,
+        stock=None,
+    )
+    listing = CompetitorListing(
+        competitor_id="ahprofi_sk",
+        competitor_sku="8711250",
+        brand=None,
+        mpn="8701250",
+        ean="123",
+        title="Kliešte Cobra 8701250",
+        price_eur=33.44,
+        currency="EUR",
+        in_stock=True,
+        url="https://www.ahprofi.sk/produkt/8711250",
+        scraped_at=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+
+    with Session(engine) as session:
+        session.add(product)
+        session.commit()
+        save_competitor_listings(session, [listing])
+        session.commit()
+        row = session.scalar(
+            select(CompetitorListingRow).where(CompetitorListingRow.url == listing.url)
+        )
+
+    assert row is not None
+    assert row.brand is None

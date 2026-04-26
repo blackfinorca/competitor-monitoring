@@ -1,13 +1,15 @@
 """Persistence helpers for scraper output."""
 
+from dataclasses import replace
 from decimal import Decimal
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from agnaradie_pricing.db.models import CompetitorListing as CompetitorListingRow
+from agnaradie_pricing.db.models import Product as ProductRow
 from agnaradie_pricing.scrapers.base import CompetitorListing
 
 
@@ -24,6 +26,7 @@ def save_competitor_listings(
     if not listings:
         return
 
+    listings = _with_backfilled_brands(session, listings)
     dialect = session.bind.dialect.name  # type: ignore[union-attr]
 
     with_url = [l for l in listings if l.url]
@@ -69,6 +72,59 @@ def save_competitor_listings(
 
     if without_url:
         session.add_all([_to_row(l) for l in without_url])
+
+
+def _with_backfilled_brands(
+    session: Session, listings: list[CompetitorListing]
+) -> list[CompetitorListing]:
+    missing_brand_eans = {
+        listing.ean
+        for listing in listings
+        if _is_missing(listing.brand) and _is_real_ean(listing.ean)
+    }
+    if not missing_brand_eans:
+        return listings
+
+    brands_by_ean: dict[str, str] = {}
+    product_rows = session.execute(
+        select(ProductRow.ean, ProductRow.brand)
+        .where(ProductRow.ean.in_(missing_brand_eans))
+        .where(ProductRow.brand.is_not(None))
+    )
+    for ean, brand in product_rows:
+        if ean is not None and not _is_missing(brand):
+            brands_by_ean.setdefault(ean, brand)
+
+    unresolved_eans = missing_brand_eans - brands_by_ean.keys()
+    if unresolved_eans:
+        listing_rows = session.execute(
+            select(CompetitorListingRow.ean, CompetitorListingRow.brand)
+            .where(CompetitorListingRow.ean.in_(unresolved_eans))
+            .where(CompetitorListingRow.brand.is_not(None))
+        )
+        for ean, brand in listing_rows:
+            if ean is not None and not _is_missing(brand):
+                brands_by_ean.setdefault(ean, brand)
+
+    if not brands_by_ean:
+        return listings
+
+    return [
+        replace(listing, brand=brands_by_ean[listing.ean])
+        if _is_missing(listing.brand)
+        and listing.ean is not None
+        and listing.ean in brands_by_ean
+        else listing
+        for listing in listings
+    ]
+
+
+def _is_real_ean(ean: str | None) -> bool:
+    return ean is not None and ean.isdigit() and 8 <= len(ean) <= 14
+
+
+def _is_missing(value: str | None) -> bool:
+    return value is None or not value.strip()
 
 
 def _to_dict(listing: CompetitorListing) -> dict:

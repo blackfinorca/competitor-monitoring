@@ -69,6 +69,7 @@ _PRODUCT_BOX_RE = re.compile(
     r'class="ctg-product-box"[^>]*data-id="(\d+)".*?href="(detail/\d+/[^"]+)"',
     re.DOTALL,
 )
+_BRAND_FIELD_LABELS = {"značka", "výrobca", "vyrobca"}
 
 
 class RebiopScraper(HeurekaFeedMixin, CompetitorScraper):
@@ -274,11 +275,12 @@ def _parse_detail_page(
 
     ean = parser.fields.get("EAN kód:") or parser.fields.get("EAN kód")
     sku = parser.fields.get("Kód:") or parser.fields.get("Kód")
+    brand = _extract_brand(parser.fields)
 
     return CompetitorListing(
         competitor_id=competitor_id,
         competitor_sku=sku,
-        brand=None,
+        brand=brand,
         mpn=None,
         ean=ean,
         title=parser.title,
@@ -288,6 +290,15 @@ def _parse_detail_page(
         url=url,
         scraped_at=datetime.now(UTC),
     )
+
+
+def _extract_brand(fields: dict[str, str]) -> str | None:
+    for label, value in fields.items():
+        normalized_label = label.strip().removesuffix(":").casefold()
+        if normalized_label in _BRAND_FIELD_LABELS:
+            brand = value.strip()
+            return brand or None
+    return None
 
 
 class _DetailParser(HTMLParser):
