@@ -145,6 +145,9 @@ def test_dashboard_theme_css_uses_selected_palette() -> None:
     assert ".stTextInput input" in css
     assert 'kind="primaryFormSubmit"' in css
     assert 'kind="secondaryFormSubmit"' in css
+    assert "focus-within" in css
+    assert "accent-color: var(--tz-accent)" in css
+    assert "box-shadow: inset 0 -2px 0 var(--tz-accent)" in css
 
 
 def test_dashboard_top_bar_reserves_small_space_for_theme_toggle() -> None:

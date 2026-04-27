@@ -152,8 +152,9 @@ def _dashboard_theme_css(mode: str | None) -> str:
     color: var(--tz-muted);
 }}
 [data-testid="stTabs"] button[aria-selected="true"] {{
-    color: var(--tz-text);
-    border-bottom-color: var(--tz-accent);
+    color: var(--tz-text) !important;
+    border-bottom-color: var(--tz-accent) !important;
+    box-shadow: inset 0 -2px 0 var(--tz-accent);
 }}
 .stButton > button,
 button[kind="secondary"],
@@ -188,6 +189,13 @@ button[disabled] {{
     border-color: var(--tz-border) !important;
     caret-color: var(--tz-accent);
 }}
+.stTextInput input:focus,
+.stTextArea textarea:focus,
+.stNumberInput input:focus {{
+    border-color: var(--tz-accent) !important;
+    box-shadow: 0 0 0 1px var(--tz-accent) !important;
+    outline: none !important;
+}}
 .stTextInput input::placeholder,
 .stTextArea textarea::placeholder {{
     color: var(--tz-muted) !important;
@@ -198,6 +206,10 @@ div[data-baseweb="popover"] div[role="listbox"] {{
     background: var(--tz-surface-alt) !important;
     border-color: var(--tz-border) !important;
 }}
+div[data-baseweb="select"]:focus-within > div {{
+    border-color: var(--tz-accent) !important;
+    box-shadow: 0 0 0 1px var(--tz-accent) !important;
+}}
 div[data-baseweb="select"] span,
 div[data-baseweb="select"] input,
 div[data-baseweb="popover"] div[role="option"],
@@ -206,6 +218,10 @@ div[data-baseweb="popover"] span {{
 }}
 div[data-baseweb="checkbox"] span {{
     color: var(--tz-text) !important;
+}}
+input[type="checkbox"],
+input[type="radio"] {{
+    accent-color: var(--tz-accent);
 }}
 a, a:visited {{
     color: var(--tz-accent);

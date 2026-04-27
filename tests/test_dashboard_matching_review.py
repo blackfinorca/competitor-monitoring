@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 
@@ -21,6 +22,7 @@ def _load_matching_review_helpers():
     namespace: dict[str, object] = {
         "bindparam": bindparam,
         "text": text,
+        "SQLAlchemyError": SQLAlchemyError,
         "_MATCH_REVIEW_AUTO_APPROVE_SIMILARITY": 0.95,
     }
     exec(compile(module, str(app_path), "exec"), namespace)
@@ -169,3 +171,26 @@ def test_auto_approve_high_similarity_matches_approves_pending_rows_only() -> No
     assert rows[3]["status"] == "rejected"
     assert rows[3]["reviewer"] == "human"
     assert rows[4]["status"] == "pending"
+
+
+def test_auto_approve_high_similarity_matches_handles_database_lock() -> None:
+    helpers = _load_matching_review_helpers()
+
+    class LockedSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            raise OperationalError("UPDATE cluster_members", {}, Exception("database is locked"))
+
+    helpers["_session"] = lambda: LockedSession()
+    clearable = _Clearable()
+    helpers["_load_price_compare_data"] = clearable
+
+    updated = helpers["_auto_approve_high_similarity_matches"]()
+
+    assert updated == 0
+    assert clearable.calls == 0
