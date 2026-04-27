@@ -322,7 +322,7 @@ def _get_llm_client():
             pass
     if not api_key:
         return None
-    model = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
     try:
         s = _get_settings()
         model = getattr(s, "openai_model", model) or model

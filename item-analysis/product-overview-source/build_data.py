@@ -1,7 +1,9 @@
 import pandas as pd, numpy as np, json, sys
-sys.stdout.reconfigure(encoding='utf-8')
+from pathlib import Path
 
-long = pd.read_pickle('C:/Coding/price-list/_long.pkl')
+_DIR = Path(__file__).parent
+
+long = pd.read_pickle(_DIR / '_long.pkl')
 
 # Drop rows without a usable total
 long = long.dropna(subset=['Total']).copy()
@@ -42,12 +44,13 @@ data = {
     'sellers_total': int(long['Seller'].nunique()),
     'offers_total': int(len(long)),
     'top_sellers': top_sellers,
+    'all_sellers': all_sellers,
     'seller_stats': seller_stats,
     'titles': titles,
     'offers': offers,
 }
 
-with open('C:/Coding/price-list/_data.json', 'w', encoding='utf-8') as f:
+with open(_DIR / '_data.json', 'w', encoding='utf-8') as f:
     json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
 print('Wrote _data.json:', round(len(json.dumps(data)) / 1024, 1), 'KB')
 print('Top sellers:', top_sellers)

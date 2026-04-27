@@ -108,8 +108,8 @@ def head_to_head_rows(data: dict, ref: str) -> list[dict]:
                 ref_cheaper += 1
             else:
                 same += 1
-            if ref_t:
-                gaps.append((o["t"] - ref_t) / ref_t * 100.0)
+            if o["t"]:
+                gaps.append((ref_t - o["t"]) / o["t"] * 100.0)
         if overlap == 0:
             continue
         out.append(
@@ -531,7 +531,7 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
         st.plotly_chart(ov_fig, use_container_width=True)
 
     # -- 9. Pricing opportunities ----------------------------------------- #
-    st.subheader(f"7. Pricing opportunities for {ref}")
+    st.subheader(f"6. Pricing opportunities for {ref}")
     comp_rows = [r for r in per_sku if r["gapPct"] is not None]
     worst = sorted(comp_rows, key=lambda r: r["gapPct"], reverse=True)[:25]
     best = sorted(comp_rows, key=lambda r: r["gapPct"])[:25]
@@ -571,7 +571,7 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
     )
 
     # -- 10. SKU explorer ------------------------------------------------- #
-    st.subheader("8. SKU explorer")
+    st.subheader("7. SKU explorer")
 
     # Build all-SKU view: ref rows + non-listed EANs (bucket "N").
     ref_map = {r["ean"]: r for r in per_sku}

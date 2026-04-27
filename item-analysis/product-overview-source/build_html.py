@@ -1,7 +1,9 @@
 import json, sys
-sys.stdout.reconfigure(encoding='utf-8')
+from pathlib import Path
 
-with open('C:/Coding/price-list/_data.json', 'r', encoding='utf-8') as f:
+_DIR = Path(__file__).parent
+
+with open(_DIR / '_data.json', 'r', encoding='utf-8') as f:
     data_str = f.read()
 
 html = r"""<!DOCTYPE html>
@@ -463,7 +465,7 @@ function renderH2H() {
       if (o.t < refT) compCheaper++;
       else if (o.t > refT) refCheaper++;
       else same++;
-      gaps.push((o.t - refT) / refT * 100);
+      if (o.t > 0) gaps.push((refT - o.t) / o.t * 100);
     }
     if (overlap === 0) continue;
     rows.push({seller: s, overlap, refCheaper, compCheaper, same,
@@ -701,7 +703,7 @@ function showSKU(ean) {
   }, {responsive: true, displayModeBar: false});
 
   document.getElementById('tbody-sku-offers').innerHTML = offers.map(o => {
-    const flag = o.s === currentRef ? ' <span class="badge badge-bad">REFERENCE</span>' : '';
+    const flag = o.s === currentRef ? ' <span class="badge badge-neutral">REFERENCE</span>' : '';
     return `<tr><td>${cellSeller(o.s)}${flag}</td>
       <td class="num">${fmtEur(o.p)}</td>
       <td class="num">${fmtEur(o.d)}</td>
@@ -737,6 +739,6 @@ setReference(DATA.top_sellers[0]);
 
 html = html.replace('__DATA_PLACEHOLDER__', data_str)
 
-with open('C:/Coding/price-list/index.html', 'w', encoding='utf-8') as f:
+with open(_DIR / 'index.html', 'w', encoding='utf-8') as f:
     f.write(html)
 print('Wrote index.html:', round(len(html) / 1024, 1), 'KB')
