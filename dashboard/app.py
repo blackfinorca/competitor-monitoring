@@ -2,9 +2,9 @@
 
 Pages
 -----
-  1. Product Search     — Search bar → live fetch / cache → ToolZone card + competitors
-  2. Recommendations    — Product vs competitor price overview (tile view)
-  3. Coverage Health    — Scrape freshness and match rates
+  1. Product Overview   — Landing dashboard with listing volume, freshness and coverage
+  2. Product Search     — Search bar → live fetch / cache → ToolZone card + competitors
+  3. Recommendations    — Product vs competitor price overview (tile view)
 
 Run with:
     python -m streamlit run dashboard/app.py
@@ -29,12 +29,13 @@ try:
 except ModuleNotFoundError:
     pass
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import altair as alt
 import pandas as pd
 import streamlit as st
-from sqlalchemy import func, select, text
+from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.orm import Session
 
 from agnaradie_pricing.db.models import (
@@ -56,6 +57,9 @@ from agnaradie_pricing.scrapers.strend import StrendproScraper
 from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
 from agnaradie_pricing.settings import Settings, load_competitors, own_store_ids
 
+from dashboard.seller_dashboard_data import load_seller_dashboard_data
+from dashboard.seller_dashboard_view import render_seller_dashboard
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -65,6 +69,172 @@ st.set_page_config(
     page_icon=":wrench:",
     layout="wide",
 )
+
+
+def _normalize_dashboard_theme(mode: str | None) -> str:
+    return "light" if mode == "light" else "dark"
+
+
+def _dashboard_theme_tokens(mode: str | None) -> dict[str, object]:
+    normalized = _normalize_dashboard_theme(mode)
+    if normalized == "light":
+        return {
+            "mode": "light",
+            "label": "Light",
+            "background": "#f7f9fc",
+            "surface": "#ffffff",
+            "surface_alt": "#eef5f8",
+            "text": "#172033",
+            "muted": "#5d6b7c",
+            "border": "#cbd5e1",
+            "grid": "#d9e2ec",
+            "accent": "#0f9f8f",
+            "accent_2": "#d97706",
+            "danger": "#dc2626",
+            "plotly_template": "plotly_white",
+            "chart_palette": ["#0f9f8f", "#2563eb", "#d97706", "#7c3aed", "#dc2626", "#64748b"],
+        }
+    return {
+        "mode": "dark",
+        "label": "Dark",
+        "background": "#111318",
+        "surface": "#191d24",
+        "surface_alt": "#222733",
+        "text": "#f6f7fb",
+        "muted": "#a9b4c2",
+        "border": "#2f3645",
+        "grid": "#344052",
+        "accent": "#2dd4bf",
+        "accent_2": "#f59e0b",
+        "danger": "#f87171",
+        "plotly_template": "plotly_dark",
+        "chart_palette": ["#2dd4bf", "#60a5fa", "#f59e0b", "#a78bfa", "#f87171", "#94a3b8"],
+    }
+
+
+def _dashboard_theme_css(mode: str | None) -> str:
+    t = _dashboard_theme_tokens(mode)
+    return f"""
+<style>
+:root {{
+    --tz-bg: {t["background"]};
+    --tz-surface: {t["surface"]};
+    --tz-surface-alt: {t["surface_alt"]};
+    --tz-text: {t["text"]};
+    --tz-muted: {t["muted"]};
+    --tz-border: {t["border"]};
+    --tz-accent: {t["accent"]};
+    --tz-accent-2: {t["accent_2"]};
+}}
+.stApp {{
+    background: var(--tz-bg);
+    color: var(--tz-text);
+}}
+.stApp p, .stApp li, .stApp span, .stApp label, .stApp div {{
+    color: inherit;
+}}
+[data-testid="stSidebar"] > div:first-child {{
+    background: var(--tz-surface);
+    border-right: 1px solid var(--tz-border);
+}}
+[data-testid="stHeader"] {{
+    background: var(--tz-bg);
+}}
+[data-testid="stMetric"], [data-testid="stDataFrame"], div[data-testid="stExpander"] {{
+    background: var(--tz-surface);
+    border: 1px solid var(--tz-border);
+    border-radius: 8px;
+}}
+[data-testid="stMetric"] {{
+    padding: 0.75rem 0.85rem;
+}}
+[data-testid="stTabs"] button[role="tab"] {{
+    color: var(--tz-muted);
+}}
+[data-testid="stTabs"] button[aria-selected="true"] {{
+    color: var(--tz-text);
+    border-bottom-color: var(--tz-accent);
+}}
+.stButton > button,
+button[kind="secondary"],
+button[kind="secondaryFormSubmit"],
+button[data-testid="stBaseButton-secondary"],
+button[data-testid="stBaseButton-secondaryFormSubmit"] {{
+    border-color: var(--tz-border);
+    background: var(--tz-surface-alt) !important;
+    color: var(--tz-text) !important;
+}}
+.stButton > button[kind="primary"],
+button[kind="primary"],
+button[kind="primaryFormSubmit"],
+button[data-testid="stBaseButton-primary"],
+button[data-testid="stBaseButton-primaryFormSubmit"] {{
+    border-color: var(--tz-accent);
+    background: var(--tz-accent) !important;
+    color: #ffffff !important;
+}}
+button:disabled,
+button[disabled] {{
+    opacity: 0.58;
+    cursor: not-allowed;
+    color: var(--tz-muted) !important;
+    background: var(--tz-surface-alt) !important;
+}}
+.stTextInput input,
+.stTextArea textarea,
+.stNumberInput input {{
+    background: var(--tz-surface-alt) !important;
+    color: var(--tz-text) !important;
+    border-color: var(--tz-border) !important;
+    caret-color: var(--tz-accent);
+}}
+.stTextInput input::placeholder,
+.stTextArea textarea::placeholder {{
+    color: var(--tz-muted) !important;
+    opacity: 1;
+}}
+div[data-baseweb="select"] > div,
+div[data-baseweb="popover"] div[role="listbox"] {{
+    background: var(--tz-surface-alt) !important;
+    border-color: var(--tz-border) !important;
+}}
+div[data-baseweb="select"] span,
+div[data-baseweb="select"] input,
+div[data-baseweb="popover"] div[role="option"],
+div[data-baseweb="popover"] span {{
+    color: var(--tz-text) !important;
+}}
+div[data-baseweb="checkbox"] span {{
+    color: var(--tz-text) !important;
+}}
+a, a:visited {{
+    color: var(--tz-accent);
+}}
+hr {{
+    border-color: var(--tz-border);
+}}
+</style>
+"""
+
+
+def _dashboard_top_bar_columns() -> list[float]:
+    return [0.88, 0.12]
+
+
+def _select_dashboard_theme() -> tuple[str, dict[str, object]]:
+    current = _normalize_dashboard_theme(st.session_state.get("dashboard_theme", "dark"))
+    light_mode = st.toggle(
+        "Light",
+        value=current == "light",
+        key="dashboard_light_mode",
+        help="Switch dashboard theme.",
+    )
+    selected = "light" if light_mode else "dark"
+    st.session_state["dashboard_theme"] = selected
+    tokens = _dashboard_theme_tokens(selected)
+    st.markdown(_dashboard_theme_css(selected), unsafe_allow_html=True)
+    return selected, tokens
+
 
 # ---------------------------------------------------------------------------
 # Cached singletons
@@ -154,17 +324,33 @@ try:
     _llm_status = str(_llm_client_check) if _llm_client_check else "disabled (no OPENAI_API_KEY)"
 except Exception:
     _llm_status = "disabled (no OPENAI_API_KEY)"
-st.caption(f"ToolZone Pricing  ·  Cycle: 1 month  ·  As of: {date.today().isoformat()}  ·  LLM: {_llm_status}")
+_status_col, _theme_col = st.columns(_dashboard_top_bar_columns(), gap="small")
+with _status_col:
+    st.caption(f"ToolZone Pricing  ·  Cycle: 1 month  ·  As of: {date.today().isoformat()}  ·  LLM: {_llm_status}")
+with _theme_col:
+    _dashboard_theme_mode, _dashboard_theme = _select_dashboard_theme()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🔍 Product Search", "💰 Price compare", "🏭 By Manufacturer",
-    "🩺 Coverage Health", "⚔️ Compare Competitors",
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📊 Product Overview", "🔍 Product Search", "💰 Price compare",
+    "🏭 By Manufacturer", "⚔️ Compare Competitors", "🧐 Matching review",
 ])
 
 
 # ===========================================================================
-# Page 1 — Product Search
+# Page 2 — Product Search
 # ===========================================================================
+
+def _product_search_match_lookup(
+    matches,
+    extra_match_info: dict[tuple[str, str | None], tuple[str, float]] | None = None,
+) -> dict[tuple[str, str | None], tuple[str, float]]:
+    lookup: dict[tuple[str, str | None], tuple[str, float]] = {}
+    for pm in matches:
+        lookup[(pm.competitor_id, pm.competitor_sku)] = (pm.match_type, float(pm.confidence))
+    if extra_match_info:
+        lookup.update(extra_match_info)
+    return lookup
+
 
 def _render_search_tab() -> None:
     st.header("Product Search")
@@ -197,6 +383,10 @@ def _render_search_tab() -> None:
 
     should_search = (submitted or refresh) and run_query
     force_refresh = bool(refresh)
+
+    if (submitted or refresh) and not run_query:
+        st.session_state.pop("search_result", None)
+        st.session_state["last_query"] = ""
 
     if should_search:
         st.session_state["last_query"] = run_query
@@ -252,9 +442,10 @@ def _render_search_tab() -> None:
     tz_row = result.tz_listing
 
     # Build match lookup: competitor_id → (match_type, confidence)
-    match_lookup: dict[str, tuple[str, float]] = {}
-    for pm in result.matches:
-        match_lookup[pm.competitor_id] = (pm.match_type, float(pm.confidence))
+    match_lookup = _product_search_match_lookup(
+        result.matches,
+        getattr(result, "match_info", None),
+    )
 
     # ToolZone price
     tz_price: float | None = None
@@ -373,7 +564,10 @@ def _render_search_tab() -> None:
                 else:
                     diff_str = f"≈ {diff_pct:+.1f}%"
 
-                mt, conf = match_lookup.get(cl.competitor_id, ("—", 0.0))
+                mt, conf = match_lookup.get(
+                    (cl.competitor_id, cl.competitor_sku),
+                    match_lookup.get((cl.competitor_id, None), ("—", 0.0)),
+                )
                 badge_map = {
                     "exact_ean":          "EAN ✓",
                     "exact_mpn":          "MPN ✓",
@@ -442,7 +636,7 @@ def _render_search_tab() -> None:
 
 
 # ===========================================================================
-# Page 2 — Price compare (tile view)
+# Page 3 — Price compare (tile view)
 # ===========================================================================
 
 PLAYBOOK_BADGE = {
@@ -453,184 +647,107 @@ PLAYBOOK_BADGE = {
 }
 
 
-@st.cache_data(ttl=300, show_spinner="Loading price data…")
+@st.cache_data(ttl=300, show_spinner="Loading clusters…")
 def _load_price_compare_data() -> dict:
-    """Fetch all Price Compare data in one session. Cached for 5 minutes.
+    """Fetch all clusters and their approved members for the Price Compare view.
 
     Returns plain dicts/lists (no ORM objects) so Streamlit can serialise them.
+
+    Each cluster maps to a tile with:
+      - title / brand / ean / method
+      - members: latest-scrape competitor_listings rows whose membership is approved
     """
-    def _f(v) -> float | None:
-        return float(v) if v is not None else None
-
     with _session() as session:
-        # 1. Matched product IDs (high-confidence matches only)
-        matched_ids: list[int] = list(session.scalars(
-            select(ProductMatch.ag_product_id)
-            .where(
-                ProductMatch.ag_product_id.isnot(None),
-                ProductMatch.confidence >= Decimal("0.85"),
+        rows = session.execute(
+            text(
+                """
+                SELECT pc.id            AS cluster_id,
+                       pc.ean           AS ean,
+                       pc.cluster_method AS method,
+                       pc.representative_brand AS rep_brand,
+                       pc.representative_title AS rep_title,
+                       cm.match_method  AS match_method,
+                       cm.llm_confidence AS llm_confidence,
+                       cl.id            AS listing_id,
+                       cl.competitor_id AS competitor_id,
+                       cl.brand         AS brand,
+                       cl.title         AS title,
+                       cl.price_eur     AS price_eur,
+                       cl.url           AS url,
+                       cl.in_stock      AS in_stock,
+                       cl.scraped_at    AS scraped_at
+                FROM   product_clusters pc
+                JOIN   cluster_members cm ON cm.cluster_id = pc.id
+                JOIN   competitor_listings cl ON cl.id = cm.listing_id
+                WHERE  cm.status = 'approved'
+                """
             )
-            .distinct()
-        ).all())
-
-        if not matched_ids:
-            return {"matched_ids": [], "products": {}, "snapshots": {}, "recommendations": {}, "comp_map": {}}
-
-        # 2. Products
-        products = {
-            p.id: {
-                "sku": p.sku,
-                "title": p.title,
-                "brand": p.brand,
-                "price_eur": _f(p.price_eur),
-            }
-            for p in session.scalars(
-                select(Product).where(Product.id.in_(matched_ids))
-            ).all()
-        }
-
-        # 3. Latest pricing snapshot per product
-        latest_snap_sub = (
-            select(
-                PricingSnapshot.ag_product_id,
-                func.max(PricingSnapshot.snapshot_date).label("max_date"),
-            )
-            .where(PricingSnapshot.ag_product_id.in_(matched_ids))
-            .group_by(PricingSnapshot.ag_product_id)
-            .subquery()
-        )
-        snapshots = {
-            row.ag_product_id: {
-                "min_price":        _f(row.min_price),
-                "max_price":        _f(row.max_price),
-                "median_price":     _f(row.median_price),
-                "ag_rank":          row.ag_rank,
-                "competitor_count": row.competitor_count,
-            }
-            for row in session.execute(
-                select(
-                    PricingSnapshot.ag_product_id,
-                    PricingSnapshot.min_price,
-                    PricingSnapshot.max_price,
-                    PricingSnapshot.median_price,
-                    PricingSnapshot.ag_rank,
-                    PricingSnapshot.competitor_count,
-                ).join(
-                    latest_snap_sub,
-                    (PricingSnapshot.ag_product_id == latest_snap_sub.c.ag_product_id)
-                    & (PricingSnapshot.snapshot_date == latest_snap_sub.c.max_date),
-                )
-            ).fetchall()
-        }
-
-        # 4. Latest recommendation per product (any status, most recent date)
-        latest_rec_sub = (
-            select(
-                Recommendation.ag_product_id,
-                func.max(Recommendation.snapshot_date).label("max_date"),
-            )
-            .where(Recommendation.ag_product_id.in_(matched_ids))
-            .group_by(Recommendation.ag_product_id)
-            .subquery()
-        )
-        recommendations = {
-            row.ag_product_id: {
-                "playbook":        row.playbook,
-                "suggested_price": _f(row.suggested_price),
-                "rationale":       row.rationale,
-            }
-            for row in session.execute(
-                select(
-                    Recommendation.ag_product_id,
-                    Recommendation.playbook,
-                    Recommendation.suggested_price,
-                    Recommendation.rationale,
-                ).join(
-                    latest_rec_sub,
-                    (Recommendation.ag_product_id == latest_rec_sub.c.ag_product_id)
-                    & (Recommendation.snapshot_date == latest_rec_sub.c.max_date),
-                )
-            ).fetchall()
-        }
-
-        # 5. Latest competitor listing per matched pair.
-        #    Correlated subquery on (competitor_id, competitor_sku, scraped_at) —
-        #    the new index idx_cl_cid_csku_scraped makes each MAX lookup O(log n)
-        #    instead of a full table scan.
-        ids_csv = ",".join(str(i) for i in matched_ids)  # ints from DB — safe
-        comp_rows = session.execute(
-            text(f"""
-                SELECT pm.ag_product_id,
-                       pm.competitor_id,
-                       cl.price_eur,
-                       cl.url,
-                       cl.in_stock,
-                       cl.scraped_at
-                FROM   product_matches pm
-                JOIN   competitor_listings cl
-                       ON  cl.competitor_id  = pm.competitor_id
-                       AND cl.competitor_sku = pm.competitor_sku
-                WHERE  pm.ag_product_id IN ({ids_csv})
-                  AND  pm.confidence    >= 0.85
-                  AND  pm.competitor_sku IS NOT NULL
-                  AND  cl.scraped_at = (
-                           SELECT MAX(cl2.scraped_at)
-                           FROM   competitor_listings cl2
-                           WHERE  cl2.competitor_id  = pm.competitor_id
-                             AND  cl2.competitor_sku = pm.competitor_sku
-                       )
-            """)
         ).fetchall()
 
-    comp_map: dict[int, list] = {}
-    for row in comp_rows:
-        comp_map.setdefault(row.ag_product_id, []).append({
-            "competitor_id": row.competitor_id,
-            "price_eur":     float(row.price_eur),
-            "url":           row.url or "",
-            "in_stock":      row.in_stock,
-            "scraped_at":    row.scraped_at,
+    clusters: dict[int, dict] = {}
+    for r in rows:
+        cl = clusters.setdefault(
+            r.cluster_id,
+            {
+                "ean":      r.ean,
+                "method":   r.method,
+                "brand":    r.rep_brand,
+                "title":    r.rep_title,
+                "members":  [],
+            },
+        )
+        is_tz = r.competitor_id == "toolzone_sk"
+        cl["members"].append({
+            "listing_id":     r.listing_id,
+            "competitor_id":  r.competitor_id,
+            "brand":          r.brand,
+            "title":          r.title,
+            "price_eur":      float(r.price_eur) if r.price_eur is not None else None,
+            "url":            r.url or "",
+            "in_stock":       r.in_stock,
+            "scraped_at":     r.scraped_at,
+            "is_toolzone":    is_tz,
+            "match_method":   r.match_method,
+            "llm_confidence": float(r.llm_confidence) if r.llm_confidence is not None else None,
         })
+        if is_tz:
+            cl["title"] = r.title or cl["title"]
+            cl["brand"] = r.brand or cl["brand"]
 
-    return {
-        "matched_ids":     matched_ids,
-        "products":        products,
-        "snapshots":       snapshots,
-        "recommendations": recommendations,
-        "comp_map":        comp_map,
-    }
+    return {"clusters": clusters}
 
 
 def _render_price_compare_tab() -> None:
     st.header("Price Compare")
+    st.caption("EAN-led product clusters. ToolZone listing pinned to top of each tile; tiles ordered by match count.")
 
     data = _load_price_compare_data()
-    matched_ids    = data["matched_ids"]
-    products       = data["products"]
-    snapshots      = data["snapshots"]
-    recommendations = data["recommendations"]
-    comp_map       = data["comp_map"]
+    clusters: dict[int, dict] = data["clusters"]
 
-    if not matched_ids:
-        st.info("No matched products yet. Run a product search to start matching products to competitors.")
+    if not clusters:
+        st.info("No clusters yet. Run `python jobs/run_new_matching.py` to build them.")
         return
 
-    # KPI row
-    total_matches = sum(len(v) for v in comp_map.values())
-    k1, k2, _, per_page_col, refresh_col = st.columns([1, 1, 2, 1, 1])
-    k1.metric("Matched products", len(matched_ids))
-    k2.metric("Total competitor prices", total_matches)
-    per_page = per_page_col.selectbox("Per page", [10, 20, 50], index=0, label_visibility="visible")
+    total_members = sum(len(c["members"]) for c in clusters.values())
+    multi = sum(1 for c in clusters.values() if len(c["members"]) > 1)
+
+    k1, k2, k3, per_page_col, refresh_col = st.columns([1, 1, 1, 1, 1])
+    k1.metric("Clusters", len(clusters))
+    k2.metric("Multi-store clusters", multi)
+    k3.metric("Member listings", total_members)
+    per_page = per_page_col.selectbox("Per page", [10, 20, 50], index=0)
     if refresh_col.button("↺ Refresh", use_container_width=True, help="Reload data from the database"):
         _load_price_compare_data.clear()
         st.rerun()
     st.divider()
 
-    # Sort tiles: most competitor matches first
-    sorted_ids = sorted(matched_ids, key=lambda pid: len(comp_map.get(pid, [])), reverse=True)
+    # Sort tiles by member count desc; multi-store before solo; stable by cluster_id.
+    sorted_ids = sorted(
+        clusters.keys(),
+        key=lambda cid: (-len(clusters[cid]["members"]), cid),
+    )
 
-    # ---- Pagination ---------------------------------------------------------
-    total_pages = max(1, -(-len(sorted_ids) // per_page))  # ceiling division
+    total_pages = max(1, -(-len(sorted_ids) // per_page))
     if "pc_page" not in st.session_state:
         st.session_state["pc_page"] = 1
     if st.session_state.get("pc_per_page") != per_page:
@@ -641,96 +758,89 @@ def _render_price_compare_tab() -> None:
     start = (page_num - 1) * per_page
     page_ids = sorted_ids[start : start + per_page]
 
-    # ---- Render tiles -------------------------------------------------------
-    for pid in page_ids:
-        product = products.get(pid)
-        if not product:
-            continue
-
-        competitors = comp_map.get(pid, [])
-        snap = snapshots.get(pid)
-        rec  = recommendations.get(pid)
-        tz_price = product["price_eur"]
+    for cid in page_ids:
+        cluster = clusters[cid]
+        members = cluster["members"]
+        # ToolZone first, then others by price asc.
+        members_sorted = sorted(
+            members,
+            key=lambda m: (
+                0 if m["is_toolzone"] else 1,
+                m["price_eur"] if m["price_eur"] is not None else float("inf"),
+            ),
+        )
+        tz_member = next((m for m in members_sorted if m["is_toolzone"]), None)
+        tz_price = tz_member["price_eur"] if tz_member else None
 
         with st.container(border=True):
             left, right = st.columns([1, 3], gap="large")
 
-            # --- Left: ToolZone reference ------------------------------------
             with left:
-                st.markdown(f"**{product['sku'] or '—'}**")
-                if product["brand"]:
-                    st.caption(product["brand"])
-                st.markdown(str(product["title"] or "")[:80])
-                st.metric(
-                    "ToolZone price",
-                    f"€ {tz_price:.2f}" if tz_price else "—",
-                )
-                n_comp = len(competitors)
-                st.caption(f"{n_comp} competitor match{'es' if n_comp != 1 else ''}")
-                if snap and snap["ag_rank"] and snap["competitor_count"]:
-                    st.caption(f"Rank #{snap['ag_rank']} of {snap['competitor_count'] + 1}")
-
-            # --- Right: competitor prices ------------------------------------
-            with right:
-                if not competitors:
-                    st.info("No competitor listings available.")
+                title = (cluster["title"] or "—")[:80]
+                brand = cluster["brand"] or ""
+                st.markdown(f"**{title}**")
+                if brand:
+                    st.caption(brand)
+                if cluster["ean"]:
+                    st.caption(f"EAN: `{cluster['ean']}`")
                 else:
-                    comp_display = []
-                    for c in sorted(competitors, key=lambda r: r["price_eur"]):
-                        price = c["price_eur"]
-                        diff_pct = (price - tz_price) / tz_price * 100 if tz_price else None
+                    st.caption(f"Method: {cluster['method']}")
+                if tz_member:
+                    st.metric("ToolZone price", f"€ {tz_price:.2f}" if tz_price else "—")
+                else:
+                    st.caption("⚠️ No ToolZone listing in this cluster")
+                n = len(members_sorted)
+                st.caption(f"{n} listing{'s' if n != 1 else ''}")
 
-                        if diff_pct is None:
-                            diff_str = "—"
-                        elif diff_pct > 0.5:
+            with right:
+                comp_display = []
+                for c in members_sorted:
+                    price = c["price_eur"]
+                    if tz_price and price is not None and not c["is_toolzone"]:
+                        diff_pct = (price - tz_price) / tz_price * 100
+                        if diff_pct > 0.5:
                             diff_str = f"▲ +{diff_pct:.1f}%"
                         elif diff_pct < -0.5:
                             diff_str = f"▼ {diff_pct:.1f}%"
                         else:
                             diff_str = f"≈ {diff_pct:+.1f}%"
+                    else:
+                        diff_str = "—"
 
-                        ts = pd.Timestamp(c["scraped_at"]).tz_localize(None)
+                    ts = pd.Timestamp(c["scraped_at"]).tz_localize(None) if c["scraped_at"] else None
+                    if ts is not None:
                         h = int((pd.Timestamp.utcnow().tz_localize(None) - ts).total_seconds() / 3600)
                         freshness = f"{h}h ago" if h < 48 else f"{h // 24}d ago"
-                        stock = "✅" if c["in_stock"] else ("❌" if c["in_stock"] is False else "—")
-
-                        comp_display.append({
-                            "Store":       _display_name(c["competitor_id"]),
-                            "Price":       f"€ {price:.2f}",
-                            "vs ToolZone": diff_str,
-                            "In Stock":    stock,
-                            "Scraped":     freshness,
-                            "URL":         c["url"],
-                        })
-
-                    st.dataframe(
-                        pd.DataFrame(comp_display),
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "URL": st.column_config.LinkColumn("Link", display_text="Open ↗"),
-                        },
+                    else:
+                        freshness = "—"
+                    stock = "✅" if c["in_stock"] else ("❌" if c["in_stock"] is False else "—")
+                    method = "EAN" if c["match_method"] == "ean" else (
+                        f"LLM {c['llm_confidence']:.2f}" if c["llm_confidence"] else c["match_method"]
                     )
 
-            # --- Bottom: stats + recommendation badge ------------------------
-            st.divider()
-            stat_cols = st.columns(5)
-            stat_cols[0].metric("Min price",  f"€ {snap['min_price']:.2f}"  if snap and snap["min_price"]  else "—")
-            stat_cols[1].metric("Max price",  f"€ {snap['max_price']:.2f}"  if snap and snap["max_price"]  else "—")
-            stat_cols[2].metric("Median",     f"€ {snap['median_price']:.2f}" if snap and snap["median_price"] else "—")
-            stat_cols[3].metric("Suggested",  f"€ {rec['suggested_price']:.2f}" if rec and rec["suggested_price"] else "—")
-            with stat_cols[4]:
-                if rec:
-                    badge = PLAYBOOK_BADGE.get(rec["playbook"], rec["playbook"].upper())
-                    st.markdown(f"**{badge}**")
-                    if rec["rationale"]:
-                        st.caption(rec["rationale"])
+                    comp_display.append({
+                        "Store":      ("⭐ " if c["is_toolzone"] else "") + _display_name(c["competitor_id"]),
+                        "Price":      f"€ {price:.2f}" if price is not None else "—",
+                        "vs TZ":      diff_str,
+                        "Stock":      stock,
+                        "Match":      method,
+                        "Scraped":    freshness,
+                        "URL":        c["url"],
+                    })
 
-    # ---- Pagination controls ------------------------------------------------
+                st.dataframe(
+                    pd.DataFrame(comp_display),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "URL": st.column_config.LinkColumn("Link", display_text="Open ↗"),
+                    },
+                )
+
     st.divider()
     nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
     with nav_left:
-        if st.button("← Previous", disabled=(page_num <= 1), use_container_width=True):
+        if st.button("← Previous", disabled=(page_num <= 1), use_container_width=True, key="pc_prev"):
             st.session_state["pc_page"] = page_num - 1
             st.rerun()
     with nav_mid:
@@ -740,133 +850,669 @@ def _render_price_compare_tab() -> None:
             unsafe_allow_html=True,
         )
     with nav_right:
-        if st.button("Next →", disabled=(page_num >= total_pages), use_container_width=True):
+        if st.button("Next →", disabled=(page_num >= total_pages), use_container_width=True, key="pc_next"):
             st.session_state["pc_page"] = page_num + 1
             st.rerun()
 
 
 # ===========================================================================
-# Page 3 — Coverage Health
+# Page 1 — Product Overview
 # ===========================================================================
 
-def _render_coverage_tab() -> None:
-    st.header("Coverage Health")
+def _build_product_overview_frame(
+    *,
+    all_configs: list[dict],
+    all_time_df: pd.DataFrame,
+    fresh_df: pd.DataFrame,
+    match_df: pd.DataFrame,
+    own_store_ids_value: set[str] | frozenset[str],
+    product_count_df: pd.DataFrame | None = None,
+    lower_price_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if product_count_df is None:
+        product_count_df = pd.DataFrame(columns=["competitor_id", "product_count"])
+    if lower_price_df is None:
+        lower_price_df = pd.DataFrame(columns=[
+            "competitor_id",
+            "lower_price_wins",
+            "price_comparisons",
+            "lower_price_rate",
+        ])
 
+    base_df = pd.DataFrame([
+        {
+            "competitor_id": c["id"],
+            "name": c.get("name", c["id"]),
+            "own_store": bool(c.get("own_store", False)) or c["id"] in own_store_ids_value,
+        }
+        for c in all_configs
+    ])
+
+    all_df = (
+        base_df
+        .merge(all_time_df, on="competitor_id", how="left")
+        .merge(fresh_df, on="competitor_id", how="left")
+        .merge(match_df, on="competitor_id", how="left")
+        .merge(product_count_df, on="competitor_id", how="left")
+        .merge(lower_price_df, on="competitor_id", how="left")
+    )
+    all_df["listings_total"] = all_df["listings_total"].fillna(0).astype(int)
+    all_df["listings_30d"] = all_df["listings_30d"].fillna(0).astype(int)
+    all_df["matches"] = all_df["matches"].fillna(0).astype(int)
+    all_df["product_count"] = all_df["product_count"].fillna(0).astype(int)
+    all_df["lower_price_wins"] = all_df["lower_price_wins"].fillna(0).astype(int)
+    all_df["price_comparisons"] = all_df["price_comparisons"].fillna(0).astype(int)
+    all_df["lower_price_rate"] = all_df["lower_price_rate"].fillna(0.0).astype(float)
+    all_df["match_rate"] = (
+        (all_df["matches"] / all_df["listings_total"].replace(0, float("nan")) * 100)
+        .round(1)
+        .fillna(0.0)
+    )
+    all_df["fresh_share"] = (
+        (all_df["listings_30d"] / all_df["listings_total"].replace(0, float("nan")) * 100)
+        .round(1)
+        .fillna(0.0)
+    )
+    return all_df.sort_values(["own_store", "listings_total"], ascending=[True, False]).reset_index(drop=True)
+
+
+def _build_lower_price_rate_frame(
+    price_df: pd.DataFrame,
+    competitor_ids: set[str] | frozenset[str],
+) -> pd.DataFrame:
+    if price_df.empty:
+        return pd.DataFrame(columns=[
+            "competitor_id",
+            "lower_price_wins",
+            "price_comparisons",
+            "lower_price_rate",
+        ])
+
+    scoped = price_df[price_df["competitor_id"].isin(competitor_ids)].copy()
+    if scoped.empty:
+        return pd.DataFrame(columns=[
+            "competitor_id",
+            "lower_price_wins",
+            "price_comparisons",
+            "lower_price_rate",
+        ])
+
+    scoped["price_eur"] = pd.to_numeric(scoped["price_eur"], errors="coerce")
+    scoped = scoped.dropna(subset=["price_eur"])
+    stats: dict[str, dict[str, int]] = {
+        cid: {"lower_price_wins": 0, "price_comparisons": 0}
+        for cid in competitor_ids
+    }
+
+    for _, group in scoped.groupby("cluster_id"):
+        prices = group.groupby("competitor_id")["price_eur"].min().to_dict()
+        for cid, price in prices.items():
+            for other_id, other_price in prices.items():
+                if cid == other_id:
+                    continue
+                stats[cid]["price_comparisons"] += 1
+                if price < other_price:
+                    stats[cid]["lower_price_wins"] += 1
+
+    rows = []
+    for cid, values in stats.items():
+        comparisons = values["price_comparisons"]
+        wins = values["lower_price_wins"]
+        rows.append({
+            "competitor_id": cid,
+            "lower_price_wins": wins,
+            "price_comparisons": comparisons,
+            "lower_price_rate": round(wins / comparisons * 100, 1) if comparisons else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def _build_product_overlap_frames(
+    membership_df: pd.DataFrame,
+    competitor_ids: set[str] | frozenset[str],
+    *,
+    top_n: int = 8,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    empty_counts = pd.DataFrame(columns=["competitor_id", "product_count"])
+    empty_points = pd.DataFrame(columns=[
+        "pair_label",
+        "competitor_id",
+        "x",
+        "y",
+        "products",
+        "overlap_products",
+        "overlap_rate",
+    ])
+    if membership_df.empty:
+        return empty_counts, empty_points
+
+    scoped = membership_df[membership_df["competitor_id"].isin(competitor_ids)].copy()
+    if scoped.empty:
+        return empty_counts, empty_points
+
+    clusters_by_comp = {
+        cid: set(group["cluster_id"])
+        for cid, group in scoped.groupby("competitor_id")
+    }
+    product_counts = pd.DataFrame([
+        {"competitor_id": cid, "product_count": len(clusters)}
+        for cid, clusters in clusters_by_comp.items()
+    ])
+
+    pair_rows = []
+    comp_ids = sorted(clusters_by_comp)
+    for index, left_id in enumerate(comp_ids):
+        for right_id in comp_ids[index + 1:]:
+            left_clusters = clusters_by_comp[left_id]
+            right_clusters = clusters_by_comp[right_id]
+            overlap = len(left_clusters & right_clusters)
+            if overlap == 0:
+                continue
+            smaller_count = max(min(len(left_clusters), len(right_clusters)), 1)
+            overlap_rate = overlap / smaller_count
+            pair_rows.append({
+                "left_id": left_id,
+                "right_id": right_id,
+                "left_products": len(left_clusters),
+                "right_products": len(right_clusters),
+                "overlap_products": overlap,
+                "overlap_rate": overlap_rate,
+            })
+
+    pair_rows.sort(key=lambda row: (row["overlap_products"], row["overlap_rate"]), reverse=True)
+    points = []
+    for row_index, pair in enumerate(pair_rows[:top_n]):
+        distance = 1.8 - min(pair["overlap_rate"], 1.0) * 1.1
+        pair_label = f"{pair['left_id']} / {pair['right_id']} · {pair['overlap_products']} matched"
+        points.extend([
+            {
+                "pair_label": pair_label,
+                "competitor_id": pair["left_id"],
+                "x": -distance / 2,
+                "y": row_index,
+                "products": pair["left_products"],
+                "overlap_products": pair["overlap_products"],
+                "overlap_rate": round(pair["overlap_rate"] * 100, 1),
+            },
+            {
+                "pair_label": pair_label,
+                "competitor_id": pair["right_id"],
+                "x": distance / 2,
+                "y": row_index,
+                "products": pair["right_products"],
+                "overlap_products": pair["overlap_products"],
+                "overlap_rate": round(pair["overlap_rate"] * 100, 1),
+            },
+        ])
+
+    return product_counts, pd.DataFrame(points) if points else empty_points
+
+
+def _build_product_overlap_layout(
+    membership_df: pd.DataFrame,
+    competitor_ids: set[str] | frozenset[str],
+    *,
+    iterations: int = 250,
+    seed: int = 0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    import math
+    import random
+
+    node_columns = [
+        "competitor_id",
+        "x",
+        "y",
+        "products",
+        "radius",
+        "partners",
+    ]
+    edge_columns = [
+        "left_id",
+        "right_id",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "mid_x",
+        "mid_y",
+        "overlap_products",
+        "overlap_rate",
+        "label",
+    ]
+    empty_nodes = pd.DataFrame(columns=node_columns)
+    empty_edges = pd.DataFrame(columns=edge_columns)
+    if membership_df.empty:
+        return empty_nodes, empty_edges
+
+    scoped = membership_df[membership_df["competitor_id"].isin(competitor_ids)]
+    if scoped.empty:
+        return empty_nodes, empty_edges
+
+    clusters_by_comp: dict[str, set[int]] = {
+        cid: set(group["cluster_id"]) for cid, group in scoped.groupby("competitor_id")
+    }
+    comp_ids = sorted(clusters_by_comp)
+    products = {cid: len(clusters_by_comp[cid]) for cid in comp_ids}
+    max_p = max(products.values()) or 1
+    radii = {
+        cid: 0.6 + 1.6 * math.sqrt(products[cid] / max_p) for cid in comp_ids
+    }
+
+    rng = random.Random(seed)
+    n = len(comp_ids)
+    positions: dict[str, list[float]] = {}
+    for i, cid in enumerate(comp_ids):
+        angle = 2 * math.pi * i / max(n, 1)
+        positions[cid] = [
+            math.cos(angle) * 4.0 + rng.uniform(-0.05, 0.05),
+            math.sin(angle) * 4.0 + rng.uniform(-0.05, 0.05),
+        ]
+
+    overlaps: dict[tuple[str, str], int] = {}
+    for i, a in enumerate(comp_ids):
+        for b in comp_ids[i + 1 :]:
+            ov = len(clusters_by_comp[a] & clusters_by_comp[b])
+            if ov:
+                overlaps[(a, b)] = ov
+
+    for _ in range(iterations):
+        for (a, b), ov in overlaps.items():
+            ra, rb = radii[a], radii[b]
+            smaller = min(products[a], products[b]) or 1
+            frac = min(ov / smaller, 1.0)
+            target = (ra + rb) * (1.0 - 0.55 * frac)
+            pa, pb = positions[a], positions[b]
+            dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+            dist = math.sqrt(dx * dx + dy * dy) or 1e-6
+            shift = (dist - target) * 0.05
+            ux, uy = dx / dist, dy / dist
+            positions[a][0] += ux * shift
+            positions[a][1] += uy * shift
+            positions[b][0] -= ux * shift
+            positions[b][1] -= uy * shift
+        for i, a in enumerate(comp_ids):
+            for b in comp_ids[i + 1 :]:
+                if (a, b) in overlaps:
+                    continue
+                ra, rb = radii[a], radii[b]
+                pa, pb = positions[a], positions[b]
+                dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+                dist = math.sqrt(dx * dx + dy * dy) or 1e-6
+                target = (ra + rb) * 1.15
+                if dist < target:
+                    push = (target - dist) * 0.05
+                    ux, uy = dx / dist, dy / dist
+                    positions[a][0] -= ux * push
+                    positions[a][1] -= uy * push
+                    positions[b][0] += ux * push
+                    positions[b][1] += uy * push
+
+    partners_per_comp: dict[str, list[tuple[str, int, float]]] = {cid: [] for cid in comp_ids}
+    edges = []
+    for (a, b), ov in overlaps.items():
+        smaller = min(products[a], products[b]) or 1
+        rate = ov / smaller
+        partners_per_comp[a].append((b, ov, rate))
+        partners_per_comp[b].append((a, ov, rate))
+        edges.append({
+            "left_id": a,
+            "right_id": b,
+            "x1": positions[a][0],
+            "y1": positions[a][1],
+            "x2": positions[b][0],
+            "y2": positions[b][1],
+            "mid_x": (positions[a][0] + positions[b][0]) / 2,
+            "mid_y": (positions[a][1] + positions[b][1]) / 2,
+            "overlap_products": ov,
+            "overlap_rate": round(rate * 100, 1),
+            "label": f"{round(rate * 100)}%",
+        })
+
+    rows = []
+    for cid in comp_ids:
+        sorted_partners = sorted(
+            partners_per_comp[cid], key=lambda p: (-p[2], -p[1])
+        )
+        rows.append({
+            "competitor_id": cid,
+            "x": positions[cid][0],
+            "y": positions[cid][1],
+            "products": products[cid],
+            "radius": radii[cid],
+            "partners": [
+                {
+                    "competitor_id": partner,
+                    "overlap_products": count,
+                    "overlap_rate": round(rate * 100, 1),
+                }
+                for partner, count, rate in sorted_partners
+            ],
+        })
+    nodes_df = pd.DataFrame(rows, columns=node_columns)
+    edges_df = (
+        pd.DataFrame(edges, columns=edge_columns)
+        if edges else empty_edges
+    )
+    return nodes_df, edges_df
+
+
+@st.cache_data(ttl=300, show_spinner="Loading seller dashboard…")
+def _load_seller_dashboard_data_cached() -> dict:
+    return load_seller_dashboard_data()
+
+
+@st.cache_data(ttl=300, show_spinner="Loading product overview…")
+def _load_product_overview_data() -> dict:
     with _session() as session:
-        week_ago = date.today() - timedelta(days=7)
+        fresh_cutoff = datetime.now(UTC) - timedelta(days=30)
 
-        listing_counts = session.execute(
+        all_time_counts = session.execute(
             select(
                 CompetitorListing.competitor_id,
-                func.count(CompetitorListing.id).label("listings"),
+                func.count(CompetitorListing.id).label("listings_total"),
                 func.max(CompetitorListing.scraped_at).label("last_scraped"),
             )
-            .where(CompetitorListing.scraped_at >= pd.Timestamp(week_ago))
             .group_by(CompetitorListing.competitor_id)
         ).fetchall()
 
-        # Count distinct matched competitor listings from listing_matches
-        # (the table written by match_products.py)
+        fresh_counts = session.execute(
+            select(
+                CompetitorListing.competitor_id,
+                func.count(CompetitorListing.id).label("listings_30d"),
+            )
+            .where(CompetitorListing.scraped_at >= fresh_cutoff)
+            .group_by(CompetitorListing.competitor_id)
+        ).fetchall()
+
         match_counts = session.execute(
             text("""
                 SELECT cl.competitor_id,
-                       COUNT(DISTINCT lm.competitor_listing_id) AS matches
-                FROM listing_matches lm
-                JOIN competitor_listings cl ON cl.id = lm.competitor_listing_id
-                WHERE lm.confidence >= 0.72
+                       COUNT(DISTINCT cl.id) AS matches
+                FROM competitor_listings cl
+                WHERE cl.id IN (
+                    SELECT lm.competitor_listing_id
+                    FROM listing_matches lm
+                    WHERE lm.confidence >= 0.72
+                    UNION
+                    SELECT cm.listing_id
+                    FROM cluster_members cm
+                    WHERE cm.status = 'approved'
+                )
                 GROUP BY cl.competitor_id
             """)
         ).fetchall()
 
-    own_stores = own_store_ids()
+        membership_rows = session.execute(
+            text("""
+                SELECT cm.cluster_id   AS cluster_id,
+                       cl.competitor_id AS competitor_id,
+                       cl.price_eur    AS price_eur
+                FROM   cluster_members cm
+                JOIN   competitor_listings cl ON cl.id = cm.listing_id
+                WHERE  cm.status = 'approved'
+            """)
+        ).fetchall()
 
-    # Build base from ALL configured competitors so every one appears even if
-    # it has no data in the DB yet.
-    all_configs = load_competitors()
-    base_df = pd.DataFrame([
-        {"competitor_id": c["id"], "name": c.get("name", c["id"])}
-        for c in all_configs
-    ])
-
-    counts_df = pd.DataFrame(listing_counts, columns=["competitor_id", "listings", "last_scraped"])
+    all_time_df = pd.DataFrame(all_time_counts, columns=["competitor_id", "listings_total", "last_scraped"])
+    fresh_df = pd.DataFrame(fresh_counts, columns=["competitor_id", "listings_30d"])
     match_df = pd.DataFrame(match_counts, columns=["competitor_id", "matches"])
+    membership_df = pd.DataFrame(membership_rows, columns=["cluster_id", "competitor_id", "price_eur"])
 
-    all_df = (
-        base_df
-        .merge(counts_df, on="competitor_id", how="left")
-        .merge(match_df, on="competitor_id", how="left")
+    own_ids = own_store_ids()
+    competitor_ids = {
+        c["id"]
+        for c in load_competitors()
+        if c["id"] not in own_ids and not c.get("own_store", False)
+    }
+    lower_price_df = _build_lower_price_rate_frame(membership_df, competitor_ids)
+    product_count_df, _ = _build_product_overlap_frames(membership_df, competitor_ids)
+    overlap_nodes_df, overlap_edges_df = _build_product_overlap_layout(
+        membership_df, competitor_ids
     )
-    all_df["listings"] = all_df["listings"].fillna(0).astype(int)
-    all_df["matches"] = all_df["matches"].fillna(0).astype(int)
-    all_df["match_rate"] = (
-        (all_df["matches"] / all_df["listings"].replace(0, float("nan")) * 100)
-        .round(1)
-        .fillna(0.0)
+
+    all_df = _build_product_overview_frame(
+        all_configs=load_competitors(),
+        all_time_df=all_time_df,
+        fresh_df=fresh_df,
+        match_df=match_df,
+        own_store_ids_value=own_ids,
+        product_count_df=product_count_df,
+        lower_price_df=lower_price_df,
     )
-    all_df["own_store"] = all_df["competitor_id"].isin(own_stores)
-    all_df = all_df.sort_values(["own_store", "listings"], ascending=[True, False])
+    competitor_df = all_df[~all_df["own_store"]].copy()
+    own_df = all_df[all_df["own_store"]].copy()
 
-    competitor_df = all_df[~all_df["own_store"]]
-    own_df = all_df[all_df["own_store"]]
-
-    active_competitors = int((competitor_df["listings"] > 0).sum())
-    total_listings = int(competitor_df["listings"].sum())
+    total_listings = int(competitor_df["listings_total"].sum())
+    fresh_listings = int(competitor_df["listings_30d"].sum())
     total_matched = int(competitor_df["matches"].sum())
-    overall_rate = round(total_matched / total_listings * 100, 1) if total_listings else 0.0
+    active_competitors = int((competitor_df["listings_total"] > 0).sum())
+
+    return {
+        "all": all_df,
+        "competitors": competitor_df,
+        "own": own_df,
+        "overlap_nodes": overlap_nodes_df,
+        "overlap_edges": overlap_edges_df,
+        "summary": {
+            "configured_competitors": int(len(competitor_df)),
+            "active_competitors": active_competitors,
+            "total_listings": total_listings,
+            "fresh_listings": fresh_listings,
+            "total_matched": total_matched,
+            "overall_rate": round(total_matched / total_listings * 100, 1) if total_listings else 0.0,
+            "fresh_share": round(fresh_listings / total_listings * 100, 1) if total_listings else 0.0,
+        },
+    }
+
+
+def _format_count(value: int | float) -> str:
+    return f"{int(value):,}"
+
+
+def _freshness_badge(ts) -> str:
+    if ts is None or pd.isna(ts):
+        return "Never"
+    delta = pd.Timestamp.utcnow().tz_localize(None) - pd.Timestamp(ts).tz_localize(None)
+    hours = delta.total_seconds() / 3600
+    if hours < 26:
+        return f"{max(int(hours), 0)}h ago"
+    if hours < 50:
+        return f"{int(hours)}h ago"
+    return f"{int(hours // 24)}d ago"
+
+
+def _render_product_overview_table(df: pd.DataFrame) -> None:
+    display = df.copy()
+    display["Store"] = display["competitor_id"].apply(_display_name)
+    display["Listings"] = display["listings_total"].apply(lambda x: _format_count(x) if x else "—")
+    display["Fresh 30d"] = display["listings_30d"].apply(lambda x: _format_count(x) if x else "—")
+    display["Matched"] = display["matches"].apply(lambda x: _format_count(x) if x else "—")
+    display["Coverage"] = display["match_rate"].apply(lambda x: f"{x:.1f}%" if x else "—")
+    display["Fresh share"] = display["fresh_share"].apply(lambda x: f"{x:.1f}%" if x else "—")
+    display["Last scraped"] = display["last_scraped"].apply(_freshness_badge)
+    st.dataframe(
+        display[["Store", "Listings", "Fresh 30d", "Matched", "Coverage", "Fresh share", "Last scraped"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def _render_product_overview_tab() -> None:
+    st.header("Product Overview")
+    st.caption("Project landing dashboard: competitor listing volume, matching coverage, and scrape freshness.")
+
+    data = _load_product_overview_data()
+    competitor_df: pd.DataFrame = data["competitors"]
+    own_df: pd.DataFrame = data["own"]
+    summary = data["summary"]
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Competitors (configured)", len(competitor_df))
-    k2.metric(f"Active last 7d / Total listings", f"{active_competitors} / {total_listings}")
-    k3.metric("Total matched", total_matched)
-    k4.metric("Overall match rate", f"{overall_rate:.1f}%")
+    k1.metric("Active competitors", f"{summary['active_competitors']} / {summary['configured_competitors']}")
+    k2.metric("All-time listings", _format_count(summary["total_listings"]))
+    k3.metric("Fresh listings 30d", _format_count(summary["fresh_listings"]), delta=f"{summary['fresh_share']:.1f}% fresh")
+    k4.metric("Matched listings", _format_count(summary["total_matched"]), delta=f"{summary['overall_rate']:.1f}% coverage")
 
     st.divider()
 
-    def _freshness_badge(ts) -> str:
-        if ts is None or pd.isna(ts):
-            return "⚪ Never"
-        delta = pd.Timestamp.utcnow().tz_localize(None) - pd.Timestamp(ts).tz_localize(None)
-        hours = delta.total_seconds() / 3600
-        if hours < 26:
-            return f"🟢 {delta.components.hours}h ago"
-        if hours < 50:
-            return f"🟡 {int(hours)}h ago"
-        return f"🔴 {int(hours // 24)}d ago"
+    seller_data = _load_seller_dashboard_data_cached()
+    if seller_data["offers_total"] == 0:
+        st.info("No clustered offers yet — approve cluster matches to populate the seller dashboard.")
+    else:
+        render_seller_dashboard(seller_data, theme=_dashboard_theme)
 
-    def _render_health_table(df: pd.DataFrame) -> None:
-        display = df.copy()
-        display["competitor_id"] = display["competitor_id"].apply(_display_name)
-        display["freshness"] = display["last_scraped"].apply(_freshness_badge)
-        display["match_rate"] = display["match_rate"].apply(lambda x: f"{x:.1f}%" if x else "—")
-        display["listings"] = display["listings"].apply(lambda x: x if x > 0 else "—")
-        display["matches"] = display["matches"].apply(lambda x: x if x > 0 else "—")
-        st.dataframe(
-            display[["competitor_id", "listings", "matches", "match_rate", "freshness"]].rename(
-                columns={
-                    "competitor_id": "Store",
-                    "listings": "Listings (7d)",
-                    "matches": "Matched",
-                    "match_rate": "Match Rate",
-                    "freshness": "Last Scraped",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
+    st.divider()
+
+    chart_df = competitor_df[competitor_df["listings_total"] > 0].copy()
+    if chart_df.empty:
+        st.info("No competitor listing data yet.")
+    else:
+        chart_df["Store"] = chart_df["competitor_id"].apply(_display_name)
+        volume_df = (
+            chart_df.sort_values("listings_total", ascending=False)
+            .head(15)
+            .rename(columns={"listings_total": "All-time listings"})
         )
 
-    st.subheader("Competitors")
-    _render_health_table(competitor_df)
+        left, right = st.columns([1.15, 1], gap="large")
+        with left:
+            st.subheader("Listings by competitor")
+            st.caption("All-time scraped listings per competitor.")
+            st.bar_chart(volume_df.set_index("Store")[["All-time listings"]])
 
-    if not own_df.empty:
-        st.subheader("Own stores")
-        st.caption("Scraped as baseline — excluded from competitor benchmarks.")
-        _render_health_table(own_df)
+        with right:
+            st.subheader("Competitor portfolio")
+            st.caption("Right is better coverage; higher is more often the cheapest; larger bubbles are bigger scraped catalogues.")
+            portfolio_df = chart_df.rename(columns={
+                "match_rate": "Coverage %",
+                "lower_price_rate": "Lower price %",
+                "listings_total": "All-time listings",
+            })
+            portfolio_df["Bubble size"] = portfolio_df["All-time listings"].clip(lower=1)
+            portfolio_df["Volume tier"] = pd.cut(
+                portfolio_df["All-time listings"],
+                bins=[0, 500, 5000, 25000, float("inf")],
+                labels=["Small", "Medium", "Large", "Strategic"],
+            ).astype(str)
+            st.scatter_chart(
+                portfolio_df,
+                x="Coverage %",
+                y="Lower price %",
+                size="Bubble size",
+                color="Volume tier",
+                use_container_width=True,
+            )
 
-    chart_data = competitor_df[competitor_df["listings"].apply(lambda x: isinstance(x, (int, float)) and x > 0)].copy()
-    if not chart_data.empty:
-        st.subheader("Listings per competitor (last 7 days)")
-        chart_data["competitor_id"] = chart_data["competitor_id"].apply(_display_name)
-        st.bar_chart(chart_data.set_index("competitor_id")[["listings"]])
+    overlap_nodes_df: pd.DataFrame = data.get("overlap_nodes", pd.DataFrame())
+    overlap_edges_df: pd.DataFrame = data.get("overlap_edges", pd.DataFrame())
+    st.subheader("Product overlap")
+    st.caption(
+        "One bubble per competitor — size is the number of clustered products; "
+        "edges show the % of the smaller catalogue shared with the partner store."
+    )
+    if overlap_nodes_df.empty:
+        st.info("No product clusters yet — approve matches to populate this view.")
+    else:
+        nodes = overlap_nodes_df.copy()
+        nodes["Store"] = nodes["competitor_id"].apply(_display_name)
+
+        def _format_partner_summary(partners) -> str:
+            if not partners:
+                return "—"
+            return " • ".join(
+                f"{_display_name(p['competitor_id'])} {p['overlap_rate']:.0f}% ({p['overlap_products']})"
+                for p in partners
+            )
+
+        nodes["Partners"] = nodes["partners"].apply(_format_partner_summary)
+
+        max_radius = float(nodes["radius"].max())
+        extent = max(
+            float(nodes["x"].abs().max()),
+            float(nodes["y"].abs().max()),
+            1.0,
+        ) + max_radius + 0.6
+        chart_px = 560
+        ppu = chart_px / (2 * extent)
+        nodes["bubble_size"] = (nodes["radius"] * ppu).pow(2) * 3.14159265
+        size_max = float(nodes["bubble_size"].max())
+
+        x_scale = alt.Scale(domain=[-extent, extent])
+        y_scale = alt.Scale(domain=[-extent, extent])
+
+        layers: list[alt.Chart] = []
+        if not overlap_edges_df.empty:
+            edges = overlap_edges_df.copy()
+            edges["Pair"] = (
+                edges["left_id"].apply(_display_name)
+                + " ↔ "
+                + edges["right_id"].apply(_display_name)
+            )
+            edge_lines = (
+                alt.Chart(edges)
+                .mark_rule(stroke=str(_dashboard_theme["muted"]), strokeDash=[3, 3], opacity=0.6)
+                .encode(
+                    x=alt.X("x1:Q", scale=x_scale, axis=None),
+                    y=alt.Y("y1:Q", scale=y_scale, axis=None),
+                    x2="x2:Q",
+                    y2="y2:Q",
+                    tooltip=[
+                        alt.Tooltip("Pair:N", title="Pair"),
+                        alt.Tooltip("overlap_products:Q", title="Shared products"),
+                        alt.Tooltip("overlap_rate:Q", title="% of smaller catalogue", format=".1f"),
+                    ],
+                )
+            )
+            edge_labels = (
+                alt.Chart(edges)
+                .mark_text(fontSize=10, color=str(_dashboard_theme["muted"]), fontWeight="bold")
+                .encode(
+                    x=alt.X("mid_x:Q", scale=x_scale, axis=None),
+                    y=alt.Y("mid_y:Q", scale=y_scale, axis=None),
+                    text="label:N",
+                )
+            )
+            layers.extend([edge_lines, edge_labels])
+
+        bubbles = (
+            alt.Chart(nodes)
+            .mark_circle(opacity=0.62, stroke=str(_dashboard_theme["surface"]), strokeWidth=1)
+            .encode(
+                x=alt.X("x:Q", scale=x_scale, axis=None),
+                y=alt.Y("y:Q", scale=y_scale, axis=None),
+                size=alt.Size(
+                    "bubble_size:Q",
+                    legend=None,
+                    scale=alt.Scale(domain=[0, size_max], range=[0, size_max]),
+                ),
+                color=alt.Color(
+                    "Store:N",
+                    scale=alt.Scale(range=list(_dashboard_theme["chart_palette"])),
+                    legend=alt.Legend(title="Competitor", orient="right", symbolOpacity=0.85),
+                ),
+                tooltip=[
+                    alt.Tooltip("Store:N", title="Competitor"),
+                    alt.Tooltip("products:Q", title="Products"),
+                    alt.Tooltip("Partners:N", title="Overlaps"),
+                ],
+            )
+        )
+        labels = (
+            alt.Chart(nodes)
+            .mark_text(fontSize=11, fontWeight="bold", color=str(_dashboard_theme["text"]))
+            .encode(
+                x=alt.X("x:Q", scale=x_scale, axis=None),
+                y=alt.Y("y:Q", scale=y_scale, axis=None),
+                text="Store:N",
+            )
+        )
+        layers.extend([bubbles, labels])
+        chart = (
+            alt.layer(*layers)
+            .properties(width=chart_px, height=chart_px)
+            .configure_view(stroke=None)
+            .configure(background=str(_dashboard_theme["background"]))
+        )
+        st.altair_chart(chart, use_container_width=False)
 
     # ---------------------------------------------------------------------------
     # Matching pipeline reference
@@ -874,7 +1520,7 @@ def _render_coverage_tab() -> None:
     st.divider()
     with st.expander("How matching works", expanded=False):
         st.markdown("""
-Each competitor listing is matched to an AG catalogue product by running layers in
+Each competitor listing is matched to a ToolZone product by running layers in
 order — the first layer that fires wins. Higher confidence = stronger evidence.
 
 | Layer | Match type | What fires it | Confidence |
@@ -885,20 +1531,10 @@ order — the first layer that fires wins. Higher confidence = stronger evidence
 | 4 | `regex_ean` | EAN extracted from listing title matches | **0.95** |
 | 5 *(opt-in)* | `llm_fuzzy` | gpt-5-nano title/spec similarity after vector retrieval | **≥ 0.85** |
 
-**LLM candidate retrieval** (layer 5): before calling the API, local vector search narrows each listing to
-up to 40 ToolZone products. The LLM then verifies the best match from that candidate set.
-
-**Normalisation**: MPN comparison strips spaces, dashes, and lowercases both sides
-(e.g. `87-01-250` = `8701250`). Brand comparison collapses accents and common
-abbreviations (e.g. `knipex` = `KNIPEX`).
-
-**Confidence thresholds used elsewhere**:
-- Price Compare and recommendations: `≥ 0.85`
-- Coverage Health match rate: `≥ 0.72` (all deterministic layers) — shows what % of a competitor's scraped listings were matched to a ToolZone product
-- LLM layer default accept: `≥ 0.85`
+Coverage uses all-time competitor listings as the denominator and matched listings
+from `listing_matches` plus approved `cluster_members` as the numerator.
 """)
 
-    # Coverage notes
     with st.expander("Competitor notes", expanded=False):
         st.markdown("""
 | Competitor | Scrape method | Notes |
@@ -917,10 +1553,18 @@ abbreviations (e.g. `knipex` = `KNIPEX`).
 | Strendpro | Full catalogue crawl | Category + pagination crawl on `strendpro.sk` |
 """)
 
+    st.divider()
+    st.subheader("Competitors")
+    st.caption("Detailed competitor table using all-time listings with a fresh-30-day signal.")
+    _render_product_overview_table(competitor_df)
 
+    if not own_df.empty:
+        st.subheader("Own stores")
+        st.caption("Scraped as baseline — excluded from competitor benchmarks.")
+        _render_product_overview_table(own_df)
 
 # ===========================================================================
-# Page 3 — Manufacturer View
+# Page 4 — Manufacturer View
 # ===========================================================================
 
 @st.cache_data(ttl=300, show_spinner="Loading manufacturer data…")
@@ -1686,20 +2330,374 @@ def _render_compare_tab() -> None:
 
 
 # ===========================================================================
+# Page 6 — Matching Review
+# ===========================================================================
+
+_MATCH_REVIEW_PER_PAGE = 50
+_MATCH_REVIEW_SELECTION_KEY = "mr_selected_member_ids"
+_MATCH_REVIEW_AUTO_APPROVE_SIMILARITY = 0.95
+
+
+def _load_matching_review(status_filter: str) -> list[dict]:
+    """Return fuzzy ClusterMember rows joined with the orphan listing and a peer member.
+
+    status_filter ∈ {'pending', 'approved', 'all'}
+    """
+    where = "cm.match_method = 'vector_llm'"
+    if status_filter == "pending":
+        where += " AND cm.status = 'pending'"
+    elif status_filter == "approved":
+        where += " AND cm.status = 'approved'"
+    elif status_filter == "rejected":
+        where += " AND cm.status = 'rejected'"
+
+    with _session() as session:
+        rows = session.execute(
+            text(
+                f"""
+                SELECT cm.id              AS member_id,
+                       cm.cluster_id      AS cluster_id,
+                       cm.status          AS status,
+                       cm.similarity      AS similarity,
+                       cm.llm_confidence  AS llm_confidence,
+                       cm.created_at      AS created_at,
+                       cm.reviewed_at     AS reviewed_at,
+                       cm.reviewer        AS reviewer,
+                       cl.id              AS listing_id,
+                       cl.competitor_id   AS competitor_id,
+                       cl.brand           AS brand,
+                       cl.title           AS title,
+                       cl.price_eur       AS price_eur,
+                       cl.url             AS url,
+                       pc.ean             AS cluster_ean,
+                       pc.representative_title AS cluster_title,
+                       pc.representative_brand AS cluster_brand
+                FROM   cluster_members cm
+                JOIN   competitor_listings cl ON cl.id = cm.listing_id
+                JOIN   product_clusters pc    ON pc.id = cm.cluster_id
+                WHERE  {where}
+                ORDER  BY cm.created_at DESC, cm.id DESC
+                """
+            )
+        ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+def _load_cluster_peers(cluster_ids: list[int]) -> dict[int, list[dict]]:
+    """Return non-fuzzy approved peer members for the given clusters (for context)."""
+    if not cluster_ids:
+        return {}
+    ids_csv = ",".join(str(int(c)) for c in cluster_ids)
+    with _session() as session:
+        rows = session.execute(
+            text(
+                f"""
+                SELECT cm.cluster_id AS cluster_id,
+                       cl.competitor_id AS competitor_id,
+                       cl.title AS title,
+                       cl.price_eur AS price_eur
+                FROM   cluster_members cm
+                JOIN   competitor_listings cl ON cl.id = cm.listing_id
+                WHERE  cm.cluster_id IN ({ids_csv})
+                  AND  cm.status = 'approved'
+                """
+            )
+        ).fetchall()
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r.cluster_id, []).append({
+            "competitor_id": r.competitor_id,
+            "title":         r.title,
+            "price_eur":     float(r.price_eur) if r.price_eur is not None else None,
+        })
+    return out
+
+
+def _set_member_status(member_id: int, new_status: str) -> None:
+    with _session() as session:
+        session.execute(
+            text(
+                """
+                UPDATE cluster_members
+                SET status = :s,
+                    reviewed_at = CURRENT_TIMESTAMP,
+                    reviewer = :r
+                WHERE id = :id
+                """
+            ),
+            {"s": new_status, "r": "dashboard", "id": member_id},
+        )
+        session.commit()
+    _load_price_compare_data.clear()
+
+
+def _approve_pending_members(member_ids: list[int]) -> int:
+    unique_ids = sorted({int(member_id) for member_id in member_ids})
+    if not unique_ids:
+        return 0
+
+    stmt = text(
+        """
+        UPDATE cluster_members
+        SET status = 'approved',
+            reviewed_at = CURRENT_TIMESTAMP,
+            reviewer = :reviewer
+        WHERE status = 'pending'
+          AND id IN :member_ids
+        """
+    ).bindparams(bindparam("member_ids", expanding=True))
+
+    with _session() as session:
+        result = session.execute(
+            stmt,
+            {"member_ids": unique_ids, "reviewer": "dashboard"},
+        )
+        session.commit()
+
+    updated = result.rowcount or 0
+    if updated:
+        _load_price_compare_data.clear()
+    return updated
+
+
+def _auto_approve_high_similarity_matches() -> int:
+    with _session() as session:
+        result = session.execute(
+            text(
+                """
+                UPDATE cluster_members
+                SET status = 'approved',
+                    reviewed_at = CURRENT_TIMESTAMP,
+                    reviewer = :reviewer
+                WHERE status = 'pending'
+                  AND match_method = 'vector_llm'
+                  AND similarity >= :threshold
+                """
+            ),
+            {
+                "reviewer": "auto_similarity_0.95",
+                "threshold": _MATCH_REVIEW_AUTO_APPROVE_SIMILARITY,
+            },
+        )
+        session.commit()
+
+    updated = result.rowcount or 0
+    if updated:
+        _load_price_compare_data.clear()
+    return updated
+
+
+def _selected_matching_review_ids() -> set[int]:
+    return {
+        int(member_id)
+        for member_id in st.session_state.get(_MATCH_REVIEW_SELECTION_KEY, [])
+    }
+
+
+def _store_selected_matching_review_ids(member_ids: set[int]) -> None:
+    st.session_state[_MATCH_REVIEW_SELECTION_KEY] = sorted(member_ids)
+
+
+def _discard_selected_matching_review_ids(member_ids: set[int]) -> None:
+    selected_ids = _selected_matching_review_ids()
+    selected_ids.difference_update(member_ids)
+    _store_selected_matching_review_ids(selected_ids)
+    for member_id in member_ids:
+        st.session_state.pop(f"mr_select_{member_id}", None)
+
+
+def _render_matching_review_tab() -> None:
+    st.header("Matching Review")
+    auto_approved = _auto_approve_high_similarity_matches()
+    st.caption(
+        "LLM-suggested fuzzy matches below 0.95 similarity are queued for review. "
+        "Matches at 0.95 similarity or higher are auto-approved."
+    )
+    if auto_approved:
+        st.success(f"Auto-approved {auto_approved} high-similarity pending match{'es' if auto_approved != 1 else ''}.")
+
+    # KPIs
+    with _session() as session:
+        kpi_rows = session.execute(
+            text(
+                """
+                SELECT status, COUNT(*) AS n
+                FROM   cluster_members
+                WHERE  match_method = 'vector_llm'
+                GROUP  BY status
+                """
+            )
+        ).fetchall()
+    counts = {r.status: r.n for r in kpi_rows}
+
+    k1, k2, k3, _spacer = st.columns([1, 1, 1, 3])
+    k1.metric("Pending",  counts.get("pending", 0))
+    k2.metric("Approved", counts.get("approved", 0))
+    k3.metric("Rejected", counts.get("rejected", 0))
+
+    filter_col, search_col = st.columns([1, 3])
+    status_filter = filter_col.selectbox(
+        "Status",
+        ["pending", "approved", "rejected", "all"],
+        index=0,
+        key="mr_status",
+    )
+    search = search_col.text_input("Search title", key="mr_search").strip().lower()
+
+    rows = _load_matching_review(status_filter)
+    if search:
+        rows = [r for r in rows if search in (r.get("title") or "").lower()]
+
+    if not rows:
+        st.info("No matches in this view.")
+        return
+
+    # Pagination
+    per_page = _MATCH_REVIEW_PER_PAGE
+    total_pages = max(1, -(-len(rows) // per_page))
+    if "mr_page" not in st.session_state:
+        st.session_state["mr_page"] = 1
+    page_num = min(st.session_state["mr_page"], total_pages)
+    start = (page_num - 1) * per_page
+    page_rows = rows[start : start + per_page]
+
+    # Pre-fetch peers for the visible page
+    peers = _load_cluster_peers([int(r["cluster_id"]) for r in page_rows])
+    pending_page_ids = [
+        int(r["member_id"])
+        for r in page_rows
+        if r["status"] == "pending"
+    ]
+    selected_pending_ids = _selected_matching_review_ids()
+    bulk_bar = st.empty()
+
+    for r in page_rows:
+        with st.container(border=True):
+            top_left, top_right = st.columns([4, 1])
+            with top_left:
+                title = r["title"] or "—"
+                store = _display_name(r["competitor_id"])
+                brand = r["brand"] or ""
+                price = float(r["price_eur"]) if r["price_eur"] is not None else None
+                st.markdown(f"**[{store}]** {title}")
+                meta = [brand]
+                if price is not None:
+                    meta.append(f"€ {price:.2f}")
+                if r["url"]:
+                    meta.append(f"[link]({r['url']})")
+                st.caption(" · ".join(m for m in meta if m))
+
+                cluster_label = (
+                    f"EAN cluster `{r['cluster_ean']}`" if r["cluster_ean"]
+                    else f"Fuzzy cluster #{r['cluster_id']}"
+                )
+                cluster_title = r["cluster_title"] or "—"
+                st.caption(f"→ joins {cluster_label}: {cluster_title}")
+
+                peer_list = [p for p in peers.get(r["cluster_id"], []) if p["competitor_id"] != r["competitor_id"]]
+                if peer_list:
+                    peer_text = "; ".join(
+                        f"[{_display_name(p['competitor_id'])}] {(p['title'] or '')[:40]}"
+                        + (f" — € {p['price_eur']:.2f}" if p["price_eur"] is not None else "")
+                        for p in peer_list[:5]
+                    )
+                    st.caption(f"Peers: {peer_text}")
+
+                sim = float(r["similarity"]) if r["similarity"] is not None else None
+                conf = float(r["llm_confidence"]) if r["llm_confidence"] is not None else None
+                st.caption(
+                    f"Similarity: {sim:.3f}  ·  LLM conf: {conf:.2f}  ·  Status: **{r['status']}**"
+                    if sim is not None and conf is not None
+                    else f"Status: **{r['status']}**"
+                )
+
+            with top_right:
+                mid = int(r["member_id"])
+                if r["status"] == "pending":
+                    checkbox_key = f"mr_select_{mid}"
+                    if checkbox_key not in st.session_state:
+                        st.session_state[checkbox_key] = mid in selected_pending_ids
+                    if st.checkbox("Select", key=checkbox_key):
+                        selected_pending_ids.add(mid)
+                    else:
+                        selected_pending_ids.discard(mid)
+                    if st.button("✓ Approve", key=f"app_{mid}", use_container_width=True, type="primary"):
+                        _set_member_status(mid, "approved")
+                        _discard_selected_matching_review_ids({mid})
+                        st.rerun()
+                    if st.button("✗ Reject", key=f"rej_{mid}", use_container_width=True):
+                        _set_member_status(mid, "rejected")
+                        _discard_selected_matching_review_ids({mid})
+                        st.rerun()
+                elif r["status"] == "approved":
+                    if st.button("↶ Revoke", key=f"rev_{mid}", use_container_width=True):
+                        _set_member_status(mid, "rejected")
+                        st.rerun()
+                else:  # rejected
+                    if st.button("↺ Re-approve", key=f"reapp_{mid}", use_container_width=True):
+                        _set_member_status(mid, "approved")
+                        st.rerun()
+
+    _store_selected_matching_review_ids(selected_pending_ids)
+    if pending_page_ids:
+        selected_count = len(selected_pending_ids)
+        selected_list = sorted(selected_pending_ids)
+        with bulk_bar.container():
+            bulk_left, bulk_mid, bulk_right = st.columns([1, 1, 4])
+            with bulk_left:
+                st.caption(f"{selected_count} selected")
+            with bulk_mid:
+                if st.button(
+                    "✓ Approve selected",
+                    key="mr_approve_selected",
+                    disabled=not selected_list,
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    updated = _approve_pending_members(selected_list)
+                    _discard_selected_matching_review_ids(set(selected_list))
+                    st.success(f"Approved {updated} selected match{'es' if updated != 1 else ''}.")
+                    st.rerun()
+            with bulk_right:
+                st.empty()
+
+    # Pagination controls
+    st.divider()
+    nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
+    with nav_left:
+        if st.button("← Previous", disabled=(page_num <= 1), use_container_width=True, key="mr_prev"):
+            st.session_state["mr_page"] = page_num - 1
+            st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<div style='text-align:center; padding-top:6px;'>Page {page_num} of {total_pages}"
+            f"  —  showing {start + 1}–{min(start + per_page, len(rows))} of {len(rows)}</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_right:
+        if st.button("Next →", disabled=(page_num >= total_pages), use_container_width=True, key="mr_next"):
+            st.session_state["mr_page"] = page_num + 1
+            st.rerun()
+
+
+# ===========================================================================
 # Wire up tabs
 # ===========================================================================
 
 with tab1:
-    _render_search_tab()
+    _render_product_overview_tab()
 
 with tab2:
-    _render_price_compare_tab()
+    _render_search_tab()
 
 with tab3:
-    _render_manufacturer_tab()
+    _render_price_compare_tab()
 
 with tab4:
-    _render_coverage_tab()
+    _render_manufacturer_tab()
 
 with tab5:
     _render_compare_tab()
+
+with tab6:
+    _render_matching_review_tab()

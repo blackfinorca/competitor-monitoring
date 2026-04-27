@@ -36,9 +36,12 @@ from urllib.parse import urlparse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from agnaradie_pricing.catalogue.normalise import fold_diacritics, normalise_ean
 from agnaradie_pricing.db.models import (
+    ClusterMember,
     CompetitorListing as DBListing,
     Product,
+    ProductCluster,
     ProductMatch,
 )
 from agnaradie_pricing.matching import match_product
@@ -52,8 +55,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CACHE_MAX_AGE_HOURS = 24 * 30  # 30-day freshness threshold for both products and listings
-_EAN_RE = re.compile(r"^\d{8}(?:\d{4,5})?$")  # EAN-8, EAN-13
 _MPN_RE = re.compile(r"^\d{2}[-\s]\d{2}[-\s]\d{3}$|^[A-Z0-9]{2,}(?:[-/][A-Z0-9]+)+$", re.I)
+_TEXT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +78,9 @@ class SearchResult:
 
     matches: list[ProductMatch] = field(default_factory=list)
     """ProductMatch records written/updated during this search."""
+
+    match_info: dict[tuple[str, str | None], tuple[str, float]] = field(default_factory=dict)
+    """Display match metadata keyed by (competitor_id, competitor_sku)."""
 
     from_cache: bool = False
     """True when the result was served entirely from the DB without HTTP calls."""
@@ -112,6 +118,7 @@ def search_product(
     force_refresh       Bypass cache and re-fetch everything from the web.
     on_progress         Optional callback(message) for UI progress updates.
     """
+    query = _normalise_search_query(query)
     result = SearchResult(query=query)
 
     def _progress(msg: str) -> None:
@@ -135,6 +142,7 @@ def search_product(
                 result.tz_listing = _latest_tz_listing(product.id, session)
                 result.competitor_hits = comp_listings
                 result.matches = _product_matches(product.id, session)
+                result.match_info = _product_match_info(product.id, session)
                 result.from_cache = True
                 _progress(f"Cache hit — {len(comp_listings)} competitor listings (< {CACHE_MAX_AGE_HOURS}h old)")
                 return result
@@ -204,6 +212,7 @@ def search_product(
     result.tz_listing = _latest_tz_listing(product.id, session)
     result.competitor_hits = _latest_competitor_listings(product.id, session)
     result.matches = _product_matches(product.id, session)
+    result.match_info = _product_match_info(product.id, session)
     result.from_cache = False
 
     _progress(f"Done — {len(result.competitor_hits)} competitor listings found.")
@@ -217,21 +226,28 @@ def search_product(
 def _classify_query(query: str) -> str:
     """Return 'ean', 'mpn', or 'text'."""
     q = query.strip()
-    if _EAN_RE.match(q):
+    if normalise_ean(q):
         return "ean"
     if _MPN_RE.match(q):
         return "mpn"
     return "text"
 
 
-def _find_product(query: str, session: Session) -> Product | None:
+def _normalise_search_query(query: str) -> str:
     q = query.strip()
+    compact_identifier = re.sub(r"[\s-]+", "", q)
+    ean = normalise_ean(q) or normalise_ean(compact_identifier)
+    if ean:
+        return ean
+    return re.sub(r"\s+", " ", q)
+
+
+def _find_product(query: str, session: Session) -> Product | None:
+    q = _normalise_search_query(query)
     kind = _classify_query(q)
 
     if kind == "ean":
-        return session.execute(
-            select(Product).where(Product.ean == q).limit(1)
-        ).scalar_one_or_none()
+        return _preferred_product_by_ean(q, session)
 
     if kind == "mpn":
         product = session.execute(
@@ -243,20 +259,115 @@ def _find_product(query: str, session: Session) -> Product | None:
             product = session.execute(
                 select(Product).where(func.lower(Product.sku) == q.lower()).limit(1)
             ).scalar_one_or_none()
+        if product is not None and product.ean:
+            return _preferred_product_by_ean(product.ean, session) or product
         return product
 
-    # Text search — try brand match first, then title
-    pattern = f"%{q.lower()}%"
-    return session.execute(
-        select(Product).where(
+    return _find_product_by_text(q, session)
+
+
+def _preferred_product_by_ean(ean: str, session: Session) -> Product | None:
+    products = list(session.execute(
+        select(Product)
+        .where(Product.ean == ean)
+        .order_by(Product.updated_at.desc(), Product.id.desc())
+    ).scalars().all())
+    if not products:
+        return None
+
+    product_by_id = {product.id: product for product in products}
+    toolzone_product_id = session.execute(
+        select(ProductMatch.ag_product_id)
+        .where(
+            ProductMatch.ag_product_id.in_(product_by_id),
+            ProductMatch.competitor_id == "toolzone_sk",
+        )
+        .order_by(ProductMatch.created_at.desc(), ProductMatch.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if toolzone_product_id in product_by_id:
+        return product_by_id[toolzone_product_id]
+
+    return products[0]
+
+
+def _find_product_by_text(query: str, session: Session) -> Product | None:
+    tokens = _text_tokens(query)
+    if not tokens:
+        return None
+    folded_query = fold_diacritics(query.lower())
+
+    token_filters = []
+    for token in tokens:
+        pattern = f"%{token}%"
+        token_filters.append(
             or_(
                 func.lower(Product.title).like(pattern),
                 func.lower(Product.brand).like(pattern),
                 func.lower(Product.mpn).like(pattern),
                 func.lower(Product.sku).like(pattern),
             )
-        ).order_by(Product.updated_at.desc()).limit(1)
-    ).scalar_one_or_none()
+        )
+
+    candidates = list(session.execute(
+        select(Product)
+        .where(or_(*token_filters))
+        .order_by(Product.updated_at.desc(), Product.id.desc())
+        .limit(200)
+    ).scalars().all())
+
+    best_product, best_score = _best_text_product(candidates, tokens, folded_query)
+
+    if best_score is None or best_score[0] == 0 or (len(tokens) > 1 and best_score[2] == 0):
+        all_products = list(session.execute(
+            select(Product).order_by(Product.updated_at.desc(), Product.id.desc())
+        ).scalars().all())
+        best_product, best_score = _best_text_product(all_products, tokens, folded_query)
+
+    if best_product is not None and best_product.ean:
+        return _preferred_product_by_ean(best_product.ean, session) or best_product
+    return best_product
+
+
+def _best_text_product(
+    products: list[Product],
+    tokens: list[str],
+    folded_query: str,
+) -> tuple[Product | None, tuple[int, int, int, int] | None]:
+    best_product: Product | None = None
+    best_score: tuple[int, int, int, int] | None = None
+    for product in products:
+        haystack = _product_text_haystack(product)
+        haystack_tokens = set(_TEXT_TOKEN_RE.findall(haystack))
+        matched = sum(1 for token in tokens if token in haystack_tokens)
+        if matched == 0:
+            continue
+        all_tokens_matched = int(matched == len(tokens))
+        phrase_matched = int(folded_query in haystack)
+        adjacent_matched = sum(
+            1
+            for left, right in zip(tokens, tokens[1:])
+            if f"{left} {right}" in haystack
+        )
+        score = (all_tokens_matched, phrase_matched, adjacent_matched, matched)
+        if best_score is None or score > best_score:
+            best_product = product
+            best_score = score
+    return best_product, best_score
+
+
+def _text_tokens(query: str) -> list[str]:
+    folded = fold_diacritics(query.lower())
+    return _TEXT_TOKEN_RE.findall(folded)
+
+
+def _product_text_haystack(product: Product) -> str:
+    return fold_diacritics(
+        " ".join(
+            str(value or "").lower()
+            for value in (product.title, product.brand, product.mpn, product.sku, product.ean)
+        )
+    )
 
 
 def _product_age_hours(product: Product) -> float | None:
@@ -270,8 +381,17 @@ def _product_age_hours(product: Product) -> float | None:
 
 
 def _latest_competitor_listings(product_id: int, session: Session) -> list[DBListing]:
-    """Return one fresh listing per competitor (non-ToolZone), newest first."""
+    """Return fresh non-ToolZone listings for the product, newest first."""
     cutoff = datetime.now(UTC) - timedelta(hours=CACHE_MAX_AGE_HOURS)
+    cluster_rows = _latest_cluster_listings(
+        product_id,
+        session,
+        include_toolzone=False,
+        cutoff=cutoff,
+    )
+    if cluster_rows:
+        return cluster_rows
+
     rows = session.execute(
         select(DBListing)
         .join(
@@ -285,6 +405,7 @@ def _latest_competitor_listings(product_id: int, session: Session) -> list[DBLis
         .where(
             ProductMatch.ag_product_id == product_id,
             DBListing.competitor_id != "toolzone_sk",
+            DBListing.scraped_at >= cutoff,
         )
         .order_by(DBListing.scraped_at.desc())
     ).scalars().all()
@@ -300,6 +421,15 @@ def _latest_competitor_listings(product_id: int, session: Session) -> list[DBLis
 
 
 def _latest_tz_listing(product_id: int, session: Session) -> DBListing | None:
+    cluster_rows = _latest_cluster_listings(
+        product_id,
+        session,
+        include_toolzone=True,
+        only_toolzone=True,
+    )
+    if cluster_rows:
+        return cluster_rows[0]
+
     return session.execute(
         select(DBListing)
         .join(
@@ -319,10 +449,79 @@ def _latest_tz_listing(product_id: int, session: Session) -> DBListing | None:
     ).scalar_one_or_none()
 
 
+def _latest_cluster_listings(
+    product_id: int,
+    session: Session,
+    *,
+    include_toolzone: bool,
+    only_toolzone: bool = False,
+    cutoff: datetime | None = None,
+) -> list[DBListing]:
+    product = session.get(Product, product_id)
+    if product is None or not product.ean:
+        return []
+
+    filters = [
+        ProductCluster.ean == product.ean,
+        ClusterMember.status == "approved",
+    ]
+    if only_toolzone:
+        filters.append(DBListing.competitor_id == "toolzone_sk")
+    elif not include_toolzone:
+        filters.append(DBListing.competitor_id != "toolzone_sk")
+    if cutoff is not None:
+        filters.append(DBListing.scraped_at >= cutoff)
+
+    return list(session.execute(
+        select(DBListing)
+        .join(ClusterMember, ClusterMember.listing_id == DBListing.id)
+        .join(ProductCluster, ProductCluster.id == ClusterMember.cluster_id)
+        .where(*filters)
+        .order_by(DBListing.scraped_at.desc(), DBListing.id.desc())
+    ).scalars().all())
+
+
 def _product_matches(product_id: int, session: Session) -> list[ProductMatch]:
     return list(session.execute(
         select(ProductMatch).where(ProductMatch.ag_product_id == product_id)
     ).scalars().all())
+
+
+def _product_match_info(product_id: int, session: Session) -> dict[tuple[str, str | None], tuple[str, float]]:
+    info: dict[tuple[str, str | None], tuple[str, float]] = {
+        (pm.competitor_id, pm.competitor_sku): (pm.match_type, float(pm.confidence))
+        for pm in _product_matches(product_id, session)
+    }
+
+    product = session.get(Product, product_id)
+    if product is None or not product.ean:
+        return info
+
+    rows = session.execute(
+        select(DBListing.competitor_id, DBListing.competitor_sku, ClusterMember.match_method,
+               ClusterMember.similarity, ClusterMember.llm_confidence)
+        .join(ClusterMember, ClusterMember.listing_id == DBListing.id)
+        .join(ProductCluster, ProductCluster.id == ClusterMember.cluster_id)
+        .where(
+            ProductCluster.ean == product.ean,
+            ClusterMember.status == "approved",
+        )
+    ).fetchall()
+
+    method_map = {
+        "ean": "exact_ean",
+        "vector_llm": "llm_fuzzy",
+        "manual": "manual",
+    }
+    for row in rows:
+        confidence = row.llm_confidence or row.similarity
+        if row.match_method == "ean" and confidence is None:
+            confidence = Decimal("1.00")
+        info[(row.competitor_id, row.competitor_sku)] = (
+            method_map.get(row.match_method, row.match_method),
+            float(confidence) if confidence is not None else 0.0,
+        )
+    return info
 
 
 # ---------------------------------------------------------------------------

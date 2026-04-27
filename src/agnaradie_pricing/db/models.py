@@ -152,6 +152,60 @@ class PricingSnapshot(Base):
     cheapest_competitor: Mapped[str | None] = mapped_column(Text)
 
 
+class ProductCluster(Base):
+    """Cross-store product cluster.
+
+    One row per logical product. Members live in `cluster_members` and reference
+    `competitor_listings` rows from any store (including ToolZone).
+    EAN-based clusters carry a unique `ean`; fuzzy LLM-built clusters have ean=NULL.
+    """
+    __tablename__ = "product_clusters"
+    __table_args__ = (
+        Index("idx_pc_ean", "ean"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    ean: Mapped[str | None] = mapped_column(Text, unique=True)
+    cluster_method: Mapped[str] = mapped_column(Text, nullable=False)  # 'ean' | 'fuzzy'
+    representative_brand: Mapped[str | None] = mapped_column(Text)
+    representative_title: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ClusterMember(Base):
+    """Membership of a competitor listing in a product cluster."""
+    __tablename__ = "cluster_members"
+    __table_args__ = (
+        UniqueConstraint("cluster_id", "listing_id", name="uq_cm_cluster_listing"),
+        UniqueConstraint("listing_id", name="uq_cm_listing"),
+        Index("idx_cm_cluster", "cluster_id"),
+        Index("idx_cm_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    cluster_id: Mapped[int] = mapped_column(
+        ForeignKey("product_clusters.id"), nullable=False
+    )
+    listing_id: Mapped[int] = mapped_column(
+        ForeignKey("competitor_listings.id"), nullable=False
+    )
+    match_method: Mapped[str] = mapped_column(Text, nullable=False)  # 'ean' | 'vector_llm' | 'manual'
+    similarity: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    llm_confidence: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="approved")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewer: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class Recommendation(Base):
     __tablename__ = "recommendations"
 
