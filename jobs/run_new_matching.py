@@ -7,9 +7,13 @@ Examples
 
     # EAN clustering only, no LLM calls
     python jobs/run_new_matching.py --no-llm
+    python jobs/run_new_matching.py --ean-only
 
     # Rebuild from scratch (drops cluster_members + product_clusters first)
     python jobs/run_new_matching.py --force
+
+    # Clear all generated match tables, then rebuild EAN clusters only
+    python jobs/run_new_matching.py --reset-all-matches --ean-only
 """
 
 from __future__ import annotations
@@ -27,11 +31,17 @@ from agnaradie_pricing.matching.new_matching import run_new_matching
 from agnaradie_pricing.settings import Settings
 
 
-def main(*, force: bool, use_llm: bool) -> dict:
+def main(*, force: bool, use_llm: bool, reset_all_matches: bool = False) -> dict:
     settings = Settings()
     Base.metadata.create_all(make_engine(settings))
     factory = make_session_factory(settings)
-    return run_new_matching(factory, settings, force=force, use_llm=use_llm)
+    return run_new_matching(
+        factory,
+        settings,
+        force=force,
+        use_llm=use_llm,
+        reset_all=reset_all_matches,
+    )
 
 
 if __name__ == "__main__":
@@ -46,10 +56,27 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip the vector + LLM fuzzy phase.",
     )
+    parser.add_argument(
+        "--ean-only",
+        action="store_true",
+        help="Run only exact EAN clustering. Alias for --no-llm.",
+    )
+    parser.add_argument(
+        "--reset-all-matches",
+        action="store_true",
+        help=(
+            "Delete generated match state from product_clusters, cluster_members, "
+            "listing_matches, and product_matches before running."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    counters = main(force=args.force, use_llm=not args.no_llm)
+    counters = main(
+        force=args.force,
+        use_llm=not (args.no_llm or args.ean_only),
+        reset_all_matches=args.reset_all_matches,
+    )
     print(
         "\n=== Done ===\n"
         f"  EAN clusters created : {counters.get('ean_clusters_created', 0)}\n"

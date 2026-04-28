@@ -9,8 +9,9 @@ Two phases:
      ask gpt-5-nano to confirm same-product, and on hit either join the
      candidate's cluster or create a new fuzzy cluster.
 
-Auto-approve threshold: LLM confidence ≥ 0.95 → approved, else pending
-(visible in the Matching review tab).
+Auto-approve threshold: vector similarity ≥ 0.96 → approved, else pending
+(visible in the Matching review tab). LLM confidence is retained as evidence,
+but it does not auto-approve below-threshold fuzzy matches.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from agnaradie_pricing.matching.vector_search import TitleVectorIndex
 logger = logging.getLogger(__name__)
 
 _VECTOR_SIM_THRESHOLD = 0.85
-_LLM_AUTO_APPROVE = Decimal("0.95")
+_SIMILARITY_AUTO_APPROVE = Decimal("0.96")
 _TOP_K_CANDIDATES = 5
 _TOOLZONE_ID = "toolzone_sk"
 _PROGRESS_EVERY = 25  # print orphan-progress every N items within a brand
@@ -68,6 +69,15 @@ def _load_all_listings(session) -> list[dict]:
 def _truncate_clusters(session) -> None:
     session.execute(text("DELETE FROM cluster_members"))
     session.execute(text("DELETE FROM product_clusters"))
+    session.commit()
+
+
+def reset_all_matches(session) -> None:
+    """Clear generated match state without deleting listings or products."""
+    session.execute(text("DELETE FROM cluster_members"))
+    session.execute(text("DELETE FROM product_clusters"))
+    session.execute(text("DELETE FROM listing_matches"))
+    session.execute(text("DELETE FROM product_matches"))
     session.commit()
 
 
@@ -190,7 +200,7 @@ def _phase_fuzzy(
         f"  brand pools     : {len(actionable_brands)}\n"
         f"  total orphans   : {total_orphans}\n"
         f"  vector threshold: {_VECTOR_SIM_THRESHOLD}\n"
-        f"  auto-approve at : LLM conf >= {_LLM_AUTO_APPROVE}\n"
+        f"  auto-approve at : similarity >= {_SIMILARITY_AUTO_APPROVE}\n"
     )
 
     attempted = approved = pending = 0
@@ -261,7 +271,7 @@ def _phase_fuzzy(
                 matched_listing, (_method, conf) = hit
                 confidence = Decimal(str(round(conf, 2)))
                 similarity = Decimal(str(round(sim_lookup.get(matched_listing["id"], 0.0), 3)))
-                status = "approved" if confidence >= _LLM_AUTO_APPROVE else "pending"
+                status = "approved" if similarity >= _SIMILARITY_AUTO_APPROVE else "pending"
 
                 cluster_id = member_to_cluster.get(matched_listing["id"])
                 if cluster_id is None:
@@ -351,6 +361,7 @@ def run_new_matching(
     *,
     force: bool = False,
     use_llm: bool = True,
+    reset_all: bool = False,
 ) -> dict:
     """Run EAN clustering + optional fuzzy LLM matching end to end.
 
@@ -360,7 +371,10 @@ def run_new_matching(
     counters: dict[str, int] = {}
 
     with session_factory() as session:
-        if force:
+        if reset_all:
+            _say("--reset-all-matches: clearing clusters plus legacy match tables")
+            reset_all_matches(session)
+        elif force:
             _say("--force: truncating cluster_members and product_clusters")
             _truncate_clusters(session)
 

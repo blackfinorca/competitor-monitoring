@@ -160,20 +160,15 @@ def test_dashboard_top_bar_reserves_small_space_for_theme_toggle() -> None:
     assert columns[1] <= 0.16
 
 
-def test_product_search_match_lookup_keeps_skus_separate() -> None:
+def test_product_search_match_lookup_uses_match_info() -> None:
     helpers = _load_compare_helpers()
 
-    class Match:
-        def __init__(self, competitor_id: str, competitor_sku: str, match_type: str, confidence: float) -> None:
-            self.competitor_id = competitor_id
-            self.competitor_sku = competitor_sku
-            self.match_type = match_type
-            self.confidence = confidence
+    match_info = {
+        ("example_sk", "A"): ("exact_ean", 1.0),
+        ("example_sk", "B"): ("llm_fuzzy", 0.86),
+    }
 
-    lookup = helpers["_product_search_match_lookup"]([
-        Match("example_sk", "A", "exact_ean", 1.0),
-        Match("example_sk", "B", "llm_fuzzy", 0.86),
-    ])
+    lookup = helpers["_product_search_match_lookup"]([], match_info)
 
     assert lookup[("example_sk", "A")] == ("exact_ean", 1.0)
     assert lookup[("example_sk", "B")] == ("llm_fuzzy", 0.86)

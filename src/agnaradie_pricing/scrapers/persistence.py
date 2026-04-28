@@ -8,6 +8,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from agnaradie_pricing.catalogue.categories import classify_product_category
 from agnaradie_pricing.db.models import CompetitorListing as CompetitorListingRow
 from agnaradie_pricing.db.models import Product as ProductRow
 from agnaradie_pricing.scrapers.base import CompetitorListing
@@ -43,6 +44,7 @@ def save_competitor_listings(
                     "brand":      func.coalesce(stmt.excluded.brand, CompetitorListingRow.brand),
                     "mpn":        func.coalesce(stmt.excluded.mpn, CompetitorListingRow.mpn),
                     "ean":        func.coalesce(stmt.excluded.ean, CompetitorListingRow.ean),
+                    "category":   stmt.excluded.category,
                     "price_eur":  stmt.excluded.price_eur,
                     "in_stock":   stmt.excluded.in_stock,
                     "title":      stmt.excluded.title,
@@ -58,6 +60,7 @@ def save_competitor_listings(
                     "brand":      func.coalesce(stmt.excluded.brand, CompetitorListingRow.brand),
                     "mpn":        func.coalesce(stmt.excluded.mpn, CompetitorListingRow.mpn),
                     "ean":        func.coalesce(stmt.excluded.ean, CompetitorListingRow.ean),
+                    "category":   stmt.excluded.category,
                     "price_eur":  stmt.excluded.price_eur,
                     "in_stock":   stmt.excluded.in_stock,
                     "title":      stmt.excluded.title,
@@ -134,6 +137,7 @@ def _to_dict(listing: CompetitorListing) -> dict:
         "brand": listing.brand,
         "mpn": listing.mpn,
         "ean": listing.ean,
+        "category": classify_product_category(title=listing.title, brand=listing.brand),
         "title": listing.title,
         "price_eur": Decimal(str(listing.price_eur)),
         "currency": listing.currency,
