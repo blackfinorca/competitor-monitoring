@@ -21,7 +21,7 @@ dependencies = [
     "selectolax>=0.3",
     "sentence-transformers>=3.0",
     "sqlalchemy>=2.0",
-    "streamlit>=1.37",
+    "streamlit>=1.40",
     "structlog>=24.4",
 ]
 

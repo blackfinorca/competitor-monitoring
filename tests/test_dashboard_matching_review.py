@@ -13,7 +13,13 @@ def _load_matching_review_helpers():
     source = app_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(app_path))
 
-    wanted = {"_approve_pending_members", "_auto_approve_high_similarity_matches"}
+    wanted = {
+        "_approve_pending_members",
+        "_auto_approve_high_similarity_matches",
+        "_selected_matching_review_ids",
+        "_store_selected_matching_review_ids",
+        "_sync_matching_review_selection",
+    }
     selected_nodes = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -23,7 +29,8 @@ def _load_matching_review_helpers():
         "bindparam": bindparam,
         "text": text,
         "SQLAlchemyError": SQLAlchemyError,
-        "_MATCH_REVIEW_AUTO_APPROVE_SIMILARITY": 0.95,
+        "_MATCH_REVIEW_AUTO_APPROVE_SIMILARITY": 0.96,
+        "_MATCH_REVIEW_SELECTION_KEY": "mr_selected_member_ids",
     }
     exec(compile(module, str(app_path), "exec"), namespace)
     return namespace
@@ -35,6 +42,10 @@ class _Clearable:
 
     def clear(self) -> None:
         self.calls += 1
+
+
+class _FakeStreamlit:
+    session_state: dict[str, object] = {}
 
 
 def test_approve_pending_members_updates_only_selected_pending_rows() -> None:
@@ -109,6 +120,25 @@ def test_approve_pending_members_noops_empty_selection() -> None:
     assert clearable.calls == 0
 
 
+def test_sync_matching_review_selection_only_updates_session_state() -> None:
+    helpers = _load_matching_review_helpers()
+    fake_st = _FakeStreamlit()
+    fake_st.session_state = {
+        "mr_selected_member_ids": [3],
+        "mr_select_7": True,
+    }
+    helpers["st"] = fake_st
+
+    helpers["_sync_matching_review_selection"](7)
+
+    assert fake_st.session_state["mr_selected_member_ids"] == [3, 7]
+
+    fake_st.session_state["mr_select_3"] = False
+    helpers["_sync_matching_review_selection"](3)
+
+    assert fake_st.session_state["mr_selected_member_ids"] == [7]
+
+
 def test_auto_approve_high_similarity_matches_approves_pending_rows_only() -> None:
     helpers = _load_matching_review_helpers()
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -135,8 +165,8 @@ def test_auto_approve_high_similarity_matches_approves_pending_rows_only() -> No
                     id, match_method, similarity, llm_confidence, status, reviewed_at, reviewer
                 )
                 VALUES
-                    (1, 'vector_llm', 0.950, 0.10, 'pending', NULL, NULL),
-                    (2, 'vector_llm', 0.949, 0.99, 'pending', NULL, NULL),
+                    (1, 'vector_llm', 0.960, 0.10, 'pending', NULL, NULL),
+                    (2, 'vector_llm', 0.959, 0.99, 'pending', NULL, NULL),
                     (3, 'vector_llm', 0.990, NULL, 'rejected', NULL, 'human'),
                     (4, 'ean',        1.000, NULL, 'pending', NULL, NULL)
                 """
@@ -165,7 +195,7 @@ def test_auto_approve_high_similarity_matches_approves_pending_rows_only() -> No
         }
 
     assert rows[1]["status"] == "approved"
-    assert rows[1]["reviewer"] == "auto_similarity_0.95"
+    assert rows[1]["reviewer"] == "auto_similarity_0.96"
     assert rows[1]["reviewed_at"] is not None
     assert rows[2]["status"] == "pending"
     assert rows[3]["status"] == "rejected"

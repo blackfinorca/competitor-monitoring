@@ -62,6 +62,7 @@ class CompetitorListing(Base):
     brand: Mapped[str | None] = mapped_column(Text)
     mpn: Mapped[str | None] = mapped_column(Text)
     ean: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     price_eur: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="EUR", nullable=False)
