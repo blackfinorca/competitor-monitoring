@@ -105,23 +105,35 @@ def build_recommendations(
         select(PricingSnapshot).where(PricingSnapshot.snapshot_date == today)
     ).all()
 
-    # Index previous snapshots by product_id for day-on-day comparison
+    # Index previous snapshots by product_id for day-on-day comparison.
+    # Subquery fetches only the single most-recent date per product instead of
+    # loading the full history into Python for deduplication.
     prev_snapshots: dict[int | None, PricingSnapshot] = {}
     if snapshots:
         from sqlalchemy import func as sqlfunc
 
-        # Get the most recent snapshot before today for each product
-        prev_rows = session.scalars(
-            select(PricingSnapshot).where(
-                PricingSnapshot.snapshot_date < today,
-                PricingSnapshot.ag_product_id.in_(
-                    [s.ag_product_id for s in snapshots]
-                ),
+        product_ids = [s.ag_product_id for s in snapshots if s.ag_product_id is not None]
+        if product_ids:
+            latest_dates_sq = (
+                select(
+                    PricingSnapshot.ag_product_id,
+                    sqlfunc.max(PricingSnapshot.snapshot_date).label("max_date"),
+                )
+                .where(
+                    PricingSnapshot.snapshot_date < today,
+                    PricingSnapshot.ag_product_id.in_(product_ids),
+                )
+                .group_by(PricingSnapshot.ag_product_id)
+                .subquery()
             )
-            .order_by(PricingSnapshot.snapshot_date.desc())
-        ).all()
-        for row in prev_rows:
-            if row.ag_product_id not in prev_snapshots:
+            prev_rows = session.scalars(
+                select(PricingSnapshot).join(
+                    latest_dates_sq,
+                    (PricingSnapshot.ag_product_id == latest_dates_sq.c.ag_product_id)
+                    & (PricingSnapshot.snapshot_date == latest_dates_sq.c.max_date),
+                )
+            ).all()
+            for row in prev_rows:
                 prev_snapshots[row.ag_product_id] = row
 
     for snap in snapshots:

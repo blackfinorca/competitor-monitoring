@@ -308,7 +308,6 @@ def _phase_fuzzy(
                     )
                 )
                 member_to_cluster[orphan["id"]] = cluster_id
-                session.commit()
 
                 if status == "approved":
                     approved += 1
@@ -323,6 +322,7 @@ def _phase_fuzzy(
                     f" approved={bucket_approved} pending={bucket_pending}"
                 )
 
+        session.commit()  # commit once per brand, not per match
         orphans_done_global += len(bucket_orphans)
         brand_secs = time.monotonic() - t_brand
         elapsed = time.monotonic() - t0

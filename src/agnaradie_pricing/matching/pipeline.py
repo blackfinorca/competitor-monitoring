@@ -151,24 +151,17 @@ def _upsert_match(session, *, listing_id: int, product_id: int, match_type: str,
         status=status,
         created_at=datetime.now(UTC),
     )
+    set_ = {k: v for k, v in values.items() if k != "listing_id"}
     try:
-        stmt = (
-            pg_insert(ProductMatch)
-            .values(**values)
-            .on_conflict_do_update(
-                index_elements=["listing_id"],
-                set_={k: v for k, v in values.items() if k != "listing_id"},
-            )
-        )
+        dialect_name = session.get_bind().dialect.name
     except Exception:
-        stmt = (
-            sqlite_insert(ProductMatch)
-            .values(**values)
-            .on_conflict_do_update(
-                index_elements=["listing_id"],
-                set_={k: v for k, v in values.items() if k != "listing_id"},
-            )
-        )
+        dialect_name = "postgresql"
+    insert_fn = sqlite_insert if dialect_name == "sqlite" else pg_insert
+    stmt = (
+        insert_fn(ProductMatch)
+        .values(**values)
+        .on_conflict_do_update(index_elements=["listing_id"], set_=set_)
+    )
     session.execute(stmt)
 
 
