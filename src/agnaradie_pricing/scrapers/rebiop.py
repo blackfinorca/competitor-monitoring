@@ -15,8 +15,8 @@ Strategy
    d. Each discovered product URL is fetched in parallel to extract EAN,
       internal code, title, price (with VAT), and stock status.
 
-3. search_by_mpn(): GET /search/products?q={brand} {mpn} — used as fallback
-   when run from match_products.py.
+3. search_by_mpn(): GET /search/products?q={brand} {mpn} — retained as a
+   scraper-level lookup helper.
 
 Category listing card structure:
   <div class="ctg-product-box" data-id="{sku}">
@@ -163,7 +163,7 @@ class RebiopScraper(HeurekaFeedMixin, CompetitorScraper):
         return None
 
     # ------------------------------------------------------------------
-    # Search fallback (used by match_products.py)
+    # Search fallback for targeted scraper lookups.
     # ------------------------------------------------------------------
 
     def search_by_mpn(self, brand: str, mpn: str) -> CompetitorListing | None:

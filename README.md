@@ -125,9 +125,9 @@ python jobs/daily_scrape.py --catalogue data/my_catalogue.csv
 
 ## Matching
 
-`jobs/match_products.py` links scraped competitor listings to ToolZone
-reference listings and writes the results to `listing_matches`. Layers run in
-order and the first hit wins.
+`jobs/run_matching.py` links scraped competitor listings to AG products and
+writes one row per listing to `product_matches`. Layers run in order and the
+first hit wins.
 
 ```
 Layer  Type                Trigger                              Confidence
@@ -136,61 +136,40 @@ Layer  Type                Trigger                              Confidence
   2    exact_mpn           Brand + MPN both match                 1.00
   3    mpn_no_brand        MPN matches, listing has no brand      0.90
   4    regex_ean           EAN extracted from listing title       0.95
-  5*   llm_fuzzy           vector top-40 + gpt-5-nano verify      0.85
-       * opt-in via --llm flag, requires OPENAI_API_KEY
+  5*   vector_llm          vector candidates + LLM verify         0.96 auto-approve
+       * enabled when OPENAI_API_KEY is set; use --no-llm to skip
 ```
 
 Notes:
 - The current LLM matcher narrows candidates locally with multilingual vector
-  search, then sends up to 40 ToolZone candidates to OpenAI for verification.
-- Default OpenAI model is `gpt-5-nano`.
-- ToolZone is the reference catalogue for `match_products.py`; `--only` limits
-  the competitor side, not the ToolZone side.
+  search, then sends the top candidates to OpenAI for verification.
+- No-brand orphan listings are skipped in the expensive vector/LLM phase to
+  avoid huge ambiguous pools.
+- Default OpenAI model is configured by `OPENAI_MODEL` in the environment.
 
-### By manufacturer and/or competitor
+### Commands
 
 ```bash
-# Match all Knipex listings (all competitors)
-python jobs/match_products.py --manufacturer knipex
+# Match only currently unmatched listings
+python jobs/run_matching.py
 
-# Match one competitor only
-python jobs/match_products.py --manufacturer knipex --only agi_sk
+# Re-match all listings from scratch
+python jobs/run_matching.py --force
 
-# Scrape fresh + match in one command
-python jobs/match_products.py --manufacturer knipex --scrape
+# Deterministic + regex only
+python jobs/run_matching.py --no-llm
 
-# Full pipeline: scrape → match → LLM fuzzy → report
-python jobs/match_products.py --manufacturer knipex --scrape --llm
-
-# LLM matching for one competitor
-python jobs/match_products.py --manufacturer knipex --only agi_sk --llm
-
-# Re-match already-matched listings (e.g. after model change)
-python jobs/match_products.py --manufacturer knipex --force --llm
+# Vector + LLM only, without exact/regex/derived fallbacks
+python jobs/run_matching.py --llm-only
 ```
 
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--manufacturer BRAND` | all brands | Brand to match (e.g. `knipex`) |
-| `--scrape` | off | Run scraping first before matching |
-| `--llm` | off | Enable LLM fuzzy layer (requires `OPENAI_API_KEY`) |
-| `--only ID [ID ...]` | all | Restrict to these competitor IDs |
 | `--force` | off | Re-match listings that already have a match |
-| `--no-report` | off | Skip the price-comparison table at the end |
-
-### Legacy matching
-
-`jobs/old_match_products.py` keeps the pre-vector LLM behavior with the same
-flags and DB output as `jobs/match_products.py`. Use it when you want to
-compare the current vector-backed matcher against the older
-brand/title-token pre-filter.
-
-```bash
-python jobs/old_match_products.py --manufacturer knipex --llm
-python jobs/old_match_products.py --only agi_sk boukal_cz --llm
-```
+| `--no-llm` | off | Skip vector/LLM phase |
+| `--llm-only` | off | Run only vector/LLM matching; requires `OPENAI_API_KEY` |
 
 ---
 
@@ -198,25 +177,22 @@ python jobs/old_match_products.py --only agi_sk boukal_cz --llm
 
 ```bash
 # ── New manufacturer, first time ──────────────────────────────────────────
-python jobs/match_products.py --manufacturer knipex --scrape --llm
+python jobs/daily_scrape.py --manufacturer knipex
+python jobs/run_matching.py
 
 # ── Refresh one competitor, then re-match ─────────────────────────────────
 python jobs/daily_scrape.py --manufacturer knipex --only agi_sk
-python jobs/match_products.py --manufacturer knipex --only agi_sk --llm
+python jobs/run_matching.py --force
 
 # ── Search competitor (needs ToolZone MPN list) ───────────────────────────
 python jobs/daily_scrape.py --manufacturer knipex --only toolzone_sk naradieshop_sk
-python jobs/match_products.py --manufacturer knipex --only naradieshop_sk --llm
+python jobs/run_matching.py --force
 
 # ── Full monthly run (all brands, all competitors) ────────────────────────
 python jobs/daily_scrape.py
-python jobs/match_products.py --llm
+python jobs/run_matching.py
 python jobs/daily_recommend.py
 python jobs/daily_alert.py
-
-# ── Compare current matcher vs legacy matcher ──────────────────────────────
-python jobs/match_products.py --only agi_sk boukal_cz --llm
-python jobs/old_match_products.py --only agi_sk boukal_cz --llm
 ```
 
 ---
@@ -237,17 +213,6 @@ python jobs/daily_recommend.py                       # no flags
 ```bash
 python jobs/daily_alert.py                           # silent if ALERT_WEBHOOK_URL not set
 ```
-
-### `old_match_products.py` — Legacy ToolZone matcher
-```bash
-python jobs/old_match_products.py --manufacturer knipex --llm
-python jobs/old_match_products.py --only agi_sk boukal_cz --llm
-```
-
-Uses the older LLM candidate selection path:
-- same CLI flags as `match_products.py`
-- same `listing_matches` output table
-- brand/title-token pre-filter before LLM verification
 
 ### `export_manufacturer.py` — Export manufacturer comparison to Excel
 
@@ -349,7 +314,7 @@ Tabs: **Product Search** · **Price Compare** · **By Manufacturer** · **Covera
 ```cron
 00 01 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_ingest.py
 00 02 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_scrape.py
-00 04 1 * *  cd /path/to/repo && .venv/bin/python jobs/match_products.py --llm
+00 04 1 * *  cd /path/to/repo && .venv/bin/python jobs/run_matching.py
 00 05 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_recommend.py
 30 05 1 * *  cd /path/to/repo && .venv/bin/python jobs/daily_alert.py
 ```

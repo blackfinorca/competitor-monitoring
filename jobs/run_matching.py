@@ -5,6 +5,7 @@ Usage
     python jobs/run_matching.py              # match only new unmatched listings
     python jobs/run_matching.py --force      # re-match everything from scratch
     python jobs/run_matching.py --no-llm     # skip vector+LLM phase
+    python jobs/run_matching.py --llm-only   # skip exact/regex/derived paths
 """
 from __future__ import annotations
 
@@ -40,17 +41,29 @@ def main() -> None:
                         help="Re-match listings that already have a match")
     parser.add_argument("--no-llm", action="store_true",
                         help="Skip vector+LLM phase (deterministic + regex only)")
+    parser.add_argument("--llm-only", action="store_true",
+                        help="Run only vector+LLM matching; skip exact/regex/derived paths")
     args = parser.parse_args()
+
+    if args.no_llm and args.llm_only:
+        parser.error("--no-llm and --llm-only cannot be used together")
 
     settings = Settings()
     factory = make_session_factory(settings)
 
     llm_client = None if args.no_llm else _get_llm_client()
     if llm_client is None and not args.no_llm:
+        if args.llm_only:
+            parser.error("--llm-only requires OPENAI_API_KEY")
         print("[run_matching] OPENAI_API_KEY not set — running without LLM phase")
 
     with factory() as session:
-        counts = run_matching(session, llm_client=llm_client, force=args.force)
+        counts = run_matching(
+            session,
+            llm_client=llm_client,
+            force=args.force,
+            llm_only=args.llm_only,
+        )
 
     print("\n[run_matching] summary:")
     for key, val in counts.items():

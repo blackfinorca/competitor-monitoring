@@ -181,7 +181,7 @@ def main(argv=None) -> Path:
         competitors_to_export = [comp_by_id[cid] for cid in selected_ids if cid in comp_by_id]
 
         if not competitors_to_export:
-            print("No competitor data found. Run daily_scrape.py and match_products.py first.")
+            print("No competitor data found. Run daily_scrape.py and run_matching.py first.")
             return output
 
         print(f"Exporting {len(competitors_to_export)} competitors: {[c['id'] for c in competitors_to_export]}")

@@ -27,7 +27,7 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -176,7 +176,13 @@ def _upsert_match(session, *, listing_id: int, product_id: int, match_type: str,
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, int]:
+def run_matching(
+    session,
+    *,
+    llm_client=None,
+    force: bool = False,
+    llm_only: bool = False,
+) -> dict[str, int]:
     """Match all unmatched competitor listings to products.
 
     Parameters
@@ -184,6 +190,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
     session     Active SQLAlchemy session.
     llm_client  Optional OpenAIClient; enables vector+LLM phase.
     force       Re-match listings that already have a product_matches row.
+    llm_only    Skip exact, regex, and derived fallback paths; run vector+LLM only.
 
     Returns
     -------
@@ -229,6 +236,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
         f"  already_matched={len(already_matched)}"
         f"  products={len(products)}"
         f"  llm={'yes' if llm_client else 'no'}"
+        f"  llm_only={'yes' if llm_only else 'no'}"
     )
 
     # ------------------------------------------------------------------
@@ -244,6 +252,9 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
     ean_to_listings: dict[str, list[dict]] = {}
     no_ean_listings: list[dict] = []
     for li in listings:
+        if llm_only:
+            no_ean_listings.append(li)
+            continue
         ean = normalise_ean(li.get("ean"))
         if ean:
             ean_to_listings.setdefault(ean, []).append(li)
@@ -320,11 +331,12 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
     # ------------------------------------------------------------------
     # Phase 1 — deterministic + regex (fast, no ML)
     # ------------------------------------------------------------------
-    n = len(listings)
+    phase1_listings = [] if llm_only else listings
+    n = len(phase1_listings)
     report_every = max(1000, n // 20)   # print ~20 updates across the whole run
     t_phase1 = time.monotonic()
 
-    for i, li in enumerate(listings, start=1):
+    for i, li in enumerate(phase1_listings, start=1):
         listing_ean = normalise_ean(li.get("ean"))
         listing_brand = normalise_brand(li.get("brand"))
         listing_mpn = normalise_mpn(li.get("mpn"))
@@ -388,6 +400,13 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             )
             session.commit()
 
+    if llm_only:
+        unmatched = list(listings)
+        _say(
+            f"[phase-1] skipped deterministic/regex in llm-only mode"
+            f"  unmatched={len(unmatched)}"
+        )
+
     session.commit()
     _say(
         f"[phase-1] done  exact={counts['exact']}  regex={counts['regex']}"
@@ -402,6 +421,10 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
     # Phase 2 — vector + LLM (brand-bucketed)
     # ------------------------------------------------------------------
     if llm_client is None:
+        if llm_only:
+            counts["skipped"] += len(unmatched)
+            session.commit()
+            return counts
         # No LLM: derived-product fallback for EAN-bearing orphans
         for li in unmatched:
             ean = normalise_ean(li.get("ean"))
@@ -439,12 +462,41 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
     _say(f"[phase-2] starting  orphans={total_orphans}  brands={n_brands}")
 
     for brand_idx, (brand, orphans) in enumerate(brand_pools.items(), start=1):
+        if brand == "__no_brand__":
+            for li in orphans:
+                ean = normalise_ean(li.get("ean"))
+                if ean and not llm_only:
+                    pid = _get_or_create_product(
+                        session,
+                        ean=ean,
+                        brand=normalise_brand(li.get("brand")),
+                        mpn=normalise_mpn(li.get("mpn")),
+                        title=li.get("title") or "",
+                    )
+                    _upsert_match(
+                        session,
+                        listing_id=li["id"],
+                        product_id=pid,
+                        match_type="derived_ean",
+                        confidence=Decimal("1.0"),
+                    )
+                    counts["derived"] += 1
+                else:
+                    counts["skipped"] += 1
+            done += len(orphans)
+            session.commit()
+            _say(
+                f"[phase-2] skipped no-brand bucket  "
+                f"orphans={len(orphans)}  done={done}/{total_orphans}"
+            )
+            continue
+
         pool = product_brand_pools.get(brand, []) + orphans
         if len(pool) < 2:
             # Nothing to compare against — fall through to derived
             for li in orphans:
                 ean = normalise_ean(li.get("ean"))
-                if ean:
+                if ean and not llm_only:
                     pid = _get_or_create_product(
                         session, ean=ean,
                         brand=normalise_brand(li.get("brand")),
@@ -456,6 +508,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
                     counts["derived"] += 1
                 else:
                     counts["skipped"] += 1
+            done += len(orphans)
             continue
 
         _say(
@@ -465,7 +518,14 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             f"  elapsed={time.monotonic()-t_phase2:.0f}s"
         )
 
+        t_index = time.monotonic()
+        _say(f"[phase-2] indexing '{brand}'  records={len(pool)}")
         index = TitleVectorIndex(pool)
+        _say(
+            f"[phase-2] indexed '{brand}'  records={len(pool)}"
+            f"  elapsed={time.monotonic()-t_index:.1f}s"
+            f"  backend={getattr(index, 'backend_description', 'unknown')}"
+        )
         if not index._vectors:
             counts["skipped"] += len(orphans)
             done += len(orphans)
@@ -474,9 +534,31 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
         matrix = np.asarray(index._vectors, dtype=np.float32)
         id_to_row = {item["id"]: idx for idx, item in enumerate(pool)}
 
+        brand_done = 0
+
+        def report_phase2_progress(*, force: bool = False) -> None:
+            if not force and brand_done % _PROGRESS_EVERY != 0:
+                return
+            elapsed2 = time.monotonic() - t_phase2
+            rate2 = done / elapsed2 if elapsed2 > 0 else 0
+            eta2 = (total_orphans - done) / rate2 if rate2 > 0 else 0
+            _say(
+                f"[phase-2] progress '{brand}'"
+                f"  brand={brand_done}/{len(orphans)}"
+                f"  done={done}/{total_orphans}"
+                f"  skipped={counts['skipped']}"
+                f"  llm_ok={counts['vector_llm']}"
+                f"  pending={counts['pending']}"
+                f"  {rate2:.1f}/s  ETA {eta2:.0f}s"
+            )
+
         for li in orphans:
+            brand_done += 1
+            done += 1
+
             if li["id"] not in id_to_row:
                 counts["skipped"] += 1
+                report_phase2_progress()
                 continue
 
             row_idx = id_to_row[li["id"]]
@@ -486,6 +568,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             k = min(_TOP_K, len(scores) - 1)
             if k <= 0:
                 counts["skipped"] += 1
+                report_phase2_progress()
                 continue
 
             top_idx = np.argpartition(-scores, k - 1)[:k]
@@ -497,7 +580,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             ]
             if not candidates:
                 ean = normalise_ean(li.get("ean"))
-                if ean:
+                if ean and not llm_only:
                     pid = _get_or_create_product(
                         session, ean=ean,
                         brand=normalise_brand(li.get("brand")),
@@ -509,6 +592,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
                     counts["derived"] += 1
                 else:
                     counts["skipped"] += 1
+                report_phase2_progress()
                 continue
 
             candidate_items = [c for c, _ in candidates]
@@ -517,6 +601,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             hit = find_best_llm_match(li, candidate_items, llm_client=llm_client)
             if hit is None:
                 counts["skipped"] += 1
+                report_phase2_progress()
                 continue
 
             matched_item, (_mt, llm_conf) = hit
@@ -570,7 +655,7 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             else:
                 counts["pending"] += 1
 
-            done += 1
+            report_phase2_progress()
 
         elapsed2 = time.monotonic() - t_phase2
         rate2 = done / elapsed2 if elapsed2 > 0 else 0
@@ -583,12 +668,24 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             f"  {rate2:.1f}/s  ETA {eta2:.0f}s"
         )
 
+    if llm_only:
+        session.commit()
+        elapsed = time.monotonic() - t0
+        _say(
+            f"[pipeline] done  exact={counts['exact']}  regex={counts['regex']}"
+            f"  vector_llm={counts['vector_llm']}  pending={counts['pending']}"
+            f"  derived={counts['derived']}  skipped={counts['skipped']}"
+            f"  elapsed={elapsed:.1f}s"
+        )
+        return counts
+
     # ------------------------------------------------------------------
     # Phase 3 — derived products for remaining EAN-bearing orphans
     # ------------------------------------------------------------------
     still_unmatched_ids: set[int] = {li["id"] for li in unmatched}
     matched_now = session.execute(
-        text("SELECT listing_id FROM product_matches WHERE listing_id IN :ids"),
+        text("SELECT listing_id FROM product_matches WHERE listing_id IN :ids")
+        .bindparams(bindparam("ids", expanding=True)),
         {"ids": tuple(still_unmatched_ids) or (0,)},
     ).fetchall()
     matched_now_ids = {r.listing_id for r in matched_now}
@@ -607,8 +704,6 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             _upsert_match(session, listing_id=li["id"], product_id=pid,
                           match_type="derived_ean", confidence=Decimal("1.0"))
             counts["derived"] += 1
-        else:
-            counts["skipped"] += 1
 
     session.commit()
 
