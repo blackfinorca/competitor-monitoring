@@ -113,8 +113,15 @@ def _get_or_create_product(session, *, ean: str | None, brand: str | None,
         if existing:
             return existing
 
+    if ean:
+        sku = f"derived-ean-{ean}"
+    elif brand and mpn:
+        sku = f"derived-{brand}-{mpn}".replace(" ", "-")[:80]
+    else:
+        sku = f"derived-{abs(hash(title)) % 9999999}"
+
     product = Product(
-        sku=None,
+        sku=sku,
         brand=brand,
         mpn=mpn,
         ean=ean,
