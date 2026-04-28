@@ -36,7 +36,7 @@ from agnaradie_pricing.db.models import Product, ProductMatch
 from agnaradie_pricing.matching.deterministic import match_deterministic
 from agnaradie_pricing.matching.regex_matcher import match_regex
 from agnaradie_pricing.matching.llm_matcher import find_best_llm_match
-from agnaradie_pricing.matching.vector_search import TitleVectorIndex
+from agnaradie_pricing.matching.vector_search import TitleVectorIndex, make_default_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +113,11 @@ def _get_or_create_product(session, *, ean: str | None, brand: str | None,
         if existing:
             return existing
 
-    if ean:
-        sku = f"derived-ean-{ean}"
-    elif brand and mpn:
-        sku = f"derived-{brand}-{mpn}".replace(" ", "-")[:80]
-    else:
-        sku = f"derived-{abs(hash(title)) % 9999999}"
+    sku = (
+        f"derived-ean-{ean}" if ean
+        else f"derived-{brand}-{mpn}".replace(" ", "-")[:80] if brand and mpn
+        else None  # NULL — SQLite UNIQUE allows multiple NULLs
+    )
 
     product = Product(
         sku=sku,
@@ -459,6 +458,7 @@ def run_matching(
     done = 0
     t_phase2 = time.monotonic()
     n_brands = len(brand_pools)
+    phase2_embedder = None
     _say(f"[phase-2] starting  orphans={total_orphans}  brands={n_brands}")
 
     for brand_idx, (brand, orphans) in enumerate(brand_pools.items(), start=1):
@@ -520,7 +520,10 @@ def run_matching(
 
         t_index = time.monotonic()
         _say(f"[phase-2] indexing '{brand}'  records={len(pool)}")
-        index = TitleVectorIndex(pool)
+        if phase2_embedder is None:
+            _say("[phase-2] initializing vector embedder")
+            phase2_embedder = make_default_embedder()
+        index = TitleVectorIndex(pool, embedder=phase2_embedder)
         _say(
             f"[phase-2] indexed '{brand}'  records={len(pool)}"
             f"  elapsed={time.monotonic()-t_index:.1f}s"
