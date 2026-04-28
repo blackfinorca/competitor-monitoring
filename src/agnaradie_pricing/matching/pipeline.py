@@ -224,12 +224,100 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
         f"  llm={'yes' if llm_client else 'no'}"
     )
 
+    # ------------------------------------------------------------------
+    # Phase 0 — EAN clustering: every unique EAN becomes a product
+    # ------------------------------------------------------------------
+    # Group all unmatched listings by their normalised EAN. For each EAN
+    # not yet in the products table, create a derived Product and match all
+    # listings with that EAN to it immediately (exact_ean, approved).
+    # This eliminates ~95% of orphans before the expensive LLM phase.
+    # ------------------------------------------------------------------
+    t_phase0 = time.monotonic()
+
+    ean_to_listings: dict[str, list[dict]] = {}
+    no_ean_listings: list[dict] = []
+    for li in listings:
+        ean = normalise_ean(li.get("ean"))
+        if ean:
+            ean_to_listings.setdefault(ean, []).append(li)
+        else:
+            no_ean_listings.append(li)
+
+    new_eans = [ean for ean in ean_to_listings if ean not in ean_idx]
+    _say(
+        f"[phase-0] EAN clustering  unique_eans={len(ean_to_listings)}"
+        f"  known_eans={len(ean_to_listings) - len(new_eans)}"
+        f"  new_eans={len(new_eans)}"
+        f"  no_ean={len(no_ean_listings)}"
+    )
+
+    report_every_0 = max(500, len(ean_to_listings) // 20)
+    processed = 0
+    for ean, ean_listings in ean_to_listings.items():
+        if ean in ean_idx:
+            product_id = ean_idx[ean]
+        else:
+            # Pick the most informative listing as representative
+            rep = max(ean_listings, key=lambda li: bool(li.get("brand")) + bool(li.get("mpn")))
+            product_id = _get_or_create_product(
+                session,
+                ean=ean,
+                brand=normalise_brand(rep.get("brand")),
+                mpn=normalise_mpn(rep.get("mpn")),
+                title=rep.get("title") or "",
+            )
+            ean_idx[ean] = product_id  # keep index up to date
+
+        for li in ean_listings:
+            _upsert_match(session, listing_id=li["id"], product_id=product_id,
+                          match_type="exact_ean", confidence=Decimal("1.0"))
+            counts["exact"] += 1
+
+        processed += 1
+        if processed % report_every_0 == 0 or processed == len(ean_to_listings):
+            elapsed = time.monotonic() - t_phase0
+            rate = processed / elapsed if elapsed > 0 else 0
+            _say(
+                f"[phase-0] {processed:>6}/{len(ean_to_listings)}"
+                f"  {processed/len(ean_to_listings)*100:5.1f}%"
+                f"  matched={counts['exact']}"
+                f"  {rate:.0f} eans/s"
+            )
+            session.commit()
+
+    session.commit()
+    _say(
+        f"[phase-0] done  ean_matched={counts['exact']}"
+        f"  remaining_no_ean={len(no_ean_listings)}"
+        f"  elapsed={time.monotonic()-t_phase0:.1f}s"
+    )
+
+    # Remaining unmatched are listings with no EAN — feed into phase 1+
+    listings = no_ean_listings
+
+    # Rebuild product index — derived products were just added
+    products = _load_products(session)
+    ean_idx = _build_ean_index(products)
+    mpn_idx = _build_mpn_index(products)
+    mpn_nb_idx = _build_mpn_nobrand_index(products)
+    products_by_id = {p["id"]: p for p in products}
+
     unmatched: list[dict] = []
+
+    # Build brand-bucketed product index for regex (avoids O(listings × all_products))
+    products_by_brand: dict[str, list[dict]] = {}
+    for p in products:
+        b = normalise_brand(p.get("brand")) or "__no_brand__"
+        products_by_brand.setdefault(b, []).append(p)
 
     # ------------------------------------------------------------------
     # Phase 1 — deterministic + regex (fast, no ML)
     # ------------------------------------------------------------------
-    for li in listings:
+    n = len(listings)
+    report_every = max(1000, n // 20)   # print ~20 updates across the whole run
+    t_phase1 = time.monotonic()
+
+    for i, li in enumerate(listings, start=1):
         listing_ean = normalise_ean(li.get("ean"))
         listing_brand = normalise_brand(li.get("brand"))
         listing_mpn = normalise_mpn(li.get("mpn"))
@@ -254,11 +342,14 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
             match_type, confidence = "mpn_no_brand", Decimal("0.9")
 
         else:
-            # Try regex against all products (use existing regex_matcher)
+            # Regex: only scan products in the same brand bucket
             listing_dict = {k: li.get(k) for k in ("brand", "mpn", "ean", "title")}
+            bucket = products_by_brand.get(listing_brand or "__no_brand__", [])
+            if listing_brand and not bucket:
+                bucket = products_by_brand.get("__no_brand__", [])
             best_result: tuple[str, float] | None = None
             best_pid: int | None = None
-            for p in products:
+            for p in bucket:
                 result = match_regex(p, listing_dict)
                 if result:
                     mt, conf = result
@@ -277,11 +368,24 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
         else:
             unmatched.append(li)
 
+        if i % report_every == 0 or i == n:
+            elapsed = time.monotonic() - t_phase1
+            rate = i / elapsed if elapsed > 0 else 0
+            eta = (n - i) / rate if rate > 0 else 0
+            pct = i / n * 100
+            _say(
+                f"[phase-1] {i:>7}/{n}  {pct:5.1f}%"
+                f"  exact={counts['exact']}  regex={counts['regex']}"
+                f"  unmatched={len(unmatched)}"
+                f"  {rate:.0f}/s  ETA {eta:.0f}s"
+            )
+            session.commit()
+
     session.commit()
     _say(
-        f"[pipeline] phase-1 done  exact/regex={counts['exact']+counts['regex']}"
+        f"[phase-1] done  exact={counts['exact']}  regex={counts['regex']}"
         f"  unmatched={len(unmatched)}"
-        f"  elapsed={time.monotonic()-t0:.1f}s"
+        f"  elapsed={time.monotonic()-t_phase1:.1f}s"
     )
 
     if not unmatched:
@@ -323,8 +427,11 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
 
     total_orphans = len(unmatched)
     done = 0
+    t_phase2 = time.monotonic()
+    n_brands = len(brand_pools)
+    _say(f"[phase-2] starting  orphans={total_orphans}  brands={n_brands}")
 
-    for brand, orphans in brand_pools.items():
+    for brand_idx, (brand, orphans) in enumerate(brand_pools.items(), start=1):
         pool = product_brand_pools.get(brand, []) + orphans
         if len(pool) < 2:
             # Nothing to compare against — fall through to derived
@@ -344,13 +451,20 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
                     counts["skipped"] += 1
             continue
 
+        _say(
+            f"[phase-2] brand {brand_idx}/{n_brands}  '{brand}'  "
+            f"orphans={len(orphans)}  pool={len(pool)}"
+            f"  done={done}/{total_orphans}"
+            f"  elapsed={time.monotonic()-t_phase2:.0f}s"
+        )
+
         index = TitleVectorIndex(pool)
         if not index._vectors:
             counts["skipped"] += len(orphans)
+            done += len(orphans)
             continue
 
         matrix = np.asarray(index._vectors, dtype=np.float32)
-        pool_ids = [item["id"] for item in pool]
         id_to_row = {item["id"]: idx for idx, item in enumerate(pool)}
 
         for li in orphans:
@@ -450,15 +564,17 @@ def run_matching(session, *, llm_client=None, force: bool = False) -> dict[str, 
                 counts["pending"] += 1
 
             done += 1
-            if done % _PROGRESS_EVERY == 0:
-                _say(
-                    f"[pipeline] phase-2  {done}/{total_orphans}"
-                    f"  approved={counts['vector_llm']}"
-                    f"  pending={counts['pending']}"
-                    f"  elapsed={time.monotonic()-t0:.1f}s"
-                )
 
+        elapsed2 = time.monotonic() - t_phase2
+        rate2 = done / elapsed2 if elapsed2 > 0 else 0
+        eta2 = (total_orphans - done) / rate2 if rate2 > 0 else 0
         session.commit()
+        _say(
+            f"[phase-2] brand done  '{brand}'  "
+            f"done={done}/{total_orphans}  {done/total_orphans*100:.1f}%"
+            f"  llm_ok={counts['vector_llm']}  pending={counts['pending']}"
+            f"  {rate2:.1f}/s  ETA {eta2:.0f}s"
+        )
 
     # ------------------------------------------------------------------
     # Phase 3 — derived products for remaining EAN-bearing orphans

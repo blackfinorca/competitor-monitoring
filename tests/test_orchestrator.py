@@ -9,10 +9,8 @@ from sqlalchemy.orm import sessionmaker
 from agnaradie_pricing import orchestrator
 from agnaradie_pricing.db.models import (
     Base,
-    ClusterMember,
     CompetitorListing,
     Product,
-    ProductCluster,
     ProductMatch,
 )
 
@@ -135,13 +133,25 @@ def test_find_product_prefers_toolzone_reference_for_duplicate_ean() -> None:
     )
     session.add_all([ag_product, tz_product])
     session.flush()
+    tz_listing = CompetitorListing(
+        competitor_id="toolzone_sk",
+        brand="Knipex",
+        ean="4003773022022",
+        title="Kliešte SIKO Cobra 250 mm KNIPEX",
+        price_eur=Decimal("22.05"),
+        currency="EUR",
+        url="https://toolzone.test/cobra",
+        scraped_at=datetime.now(UTC),
+    )
+    session.add(tz_listing)
+    session.flush()
     session.add(
         ProductMatch(
-            ag_product_id=tz_product.id,
-            competitor_id="toolzone_sk",
-            competitor_sku="4003773022022",
+            listing_id=tz_listing.id,
+            product_id=tz_product.id,
             match_type="exact_ean",
             confidence=Decimal("1.00"),
+            status="approved",
         )
     )
     session.commit()
@@ -165,9 +175,7 @@ def test_latest_competitor_listings_filters_stale_legacy_matches() -> None:
     session.flush()
     stale_listing = CompetitorListing(
         competitor_id="example_sk",
-        competitor_sku="old",
         brand="Knipex",
-        mpn="87-01-250",
         ean="4003773022022",
         title="Old Cobra",
         price_eur=Decimal("19.99"),
@@ -180,11 +188,11 @@ def test_latest_competitor_listings_filters_stale_legacy_matches() -> None:
     session.flush()
     session.add(
         ProductMatch(
-            ag_product_id=product.id,
-            competitor_id="example_sk",
-            competitor_sku="old",
+            listing_id=stale_listing.id,
+            product_id=product.id,
             match_type="exact_ean",
             confidence=Decimal("1.00"),
+            status="approved",
         )
     )
     session.commit()
@@ -194,46 +202,30 @@ def test_latest_competitor_listings_filters_stale_legacy_matches() -> None:
     assert rows == []
 
 
-def test_latest_tz_listing_falls_back_to_approved_ean_cluster() -> None:
+def test_latest_tz_listing_returns_approved_product_match() -> None:
     session = _session()
     product = Product(
-        sku="AG-KNIPEX-8701250",
-        brand="KNIPEX",
-        mpn="87-01-250",
+        sku="TZ-Cobra-250",
+        brand="Knipex",
         ean="4003773022022",
-        title="KNIPEX Klieste instalaterske Cobra 8701250",
+        title="Kliešte SIKO Cobra 250 mm KNIPEX",
     )
     tz_listing = CompetitorListing(
         competitor_id="toolzone_sk",
-        competitor_sku="4003773022022",
         brand="Knipex",
-        mpn="E7455930250",
         ean="4003773022022",
         title="Kliešte SIKO Cobra 250 mm KNIPEX",
         price_eur=Decimal("22.05"),
         currency="EUR",
-        in_stock=True,
         url="https://toolzone.test/cobra",
         scraped_at=datetime.now(UTC),
     )
     session.add_all([product, tz_listing])
     session.flush()
-    cluster = ProductCluster(
-        ean="4003773022022",
-        cluster_method="ean",
-        representative_brand="Knipex",
-        representative_title="Kliešte SIKO Cobra 250 mm KNIPEX",
-    )
-    session.add(cluster)
-    session.flush()
-    session.add(
-        ClusterMember(
-            cluster_id=cluster.id,
-            listing_id=tz_listing.id,
-            match_method="ean",
-            status="approved",
-        )
-    )
+    session.add(ProductMatch(
+        listing_id=tz_listing.id, product_id=product.id,
+        match_type="exact_ean", confidence=Decimal("1.00"), status="approved",
+    ))
     session.commit()
 
     found = orchestrator._latest_tz_listing(product.id, session)
@@ -242,114 +234,75 @@ def test_latest_tz_listing_falls_back_to_approved_ean_cluster() -> None:
     assert found.id == tz_listing.id
 
 
-def test_latest_competitor_listings_reads_approved_ean_cluster_members() -> None:
+def test_latest_competitor_listings_returns_approved_product_matches() -> None:
     session = _session()
     product = Product(
         sku="TZ-Cobra-250",
         brand="Knipex",
-        mpn="87-01-250",
         ean="4003773022022",
         title="Kliešte SIKO Cobra 250 mm KNIPEX",
     )
-    competitor_listing = CompetitorListing(
+    listing = CompetitorListing(
         competitor_id="ahprofi_sk",
-        competitor_sku="8701250",
         brand="Knipex",
-        mpn="87-01-250",
         ean="4003773022022",
-        title="SIKO kliešte Cobra - 250 mm - 8701250",
+        title="SIKO kliešte Cobra 250 mm",
         price_eur=Decimal("21.50"),
         currency="EUR",
-        in_stock=True,
         url="https://ahprofi.test/cobra",
         scraped_at=datetime.now(UTC),
     )
-    session.add_all([product, competitor_listing])
+    session.add_all([product, listing])
     session.flush()
-    cluster = ProductCluster(
-        ean="4003773022022",
-        cluster_method="ean",
-        representative_brand="Knipex",
-        representative_title="Kliešte SIKO Cobra 250 mm KNIPEX",
-    )
-    session.add(cluster)
-    session.flush()
-    session.add(
-        ClusterMember(
-            cluster_id=cluster.id,
-            listing_id=competitor_listing.id,
-            match_method="ean",
-            status="approved",
-        )
-    )
+    session.add(ProductMatch(
+        listing_id=listing.id, product_id=product.id,
+        match_type="exact_ean", confidence=Decimal("1.00"), status="approved",
+    ))
     session.commit()
 
     rows = orchestrator._latest_competitor_listings(product.id, session)
 
-    assert [row.id for row in rows] == [competitor_listing.id]
+    assert [r.id for r in rows] == [listing.id]
 
 
-def test_latest_competitor_listings_keeps_multiple_approved_rows_from_same_competitor() -> None:
+def test_latest_competitor_listings_deduplicates_to_newest_per_competitor() -> None:
     session = _session()
     product = Product(
         sku="TZ-Cobra-250",
         brand="Knipex",
-        mpn="87-01-250",
         ean="4003773022022",
         title="Kliešte SIKO Cobra 250 mm KNIPEX",
     )
-    first_listing = CompetitorListing(
+    old_listing = CompetitorListing(
         competitor_id="doktorkladivo_sk",
-        competitor_sku="dk-old",
         brand="Knipex",
-        mpn="87-01-250",
         ean="4003773022022",
-        title="KNIPEX Kliešte inštalatérske Cobra 8701250",
+        title="KNIPEX Cobra 8701250",
         price_eur=Decimal("22.10"),
         currency="EUR",
-        in_stock=True,
         url="https://doktorkladivo.test/cobra-old",
         scraped_at=datetime.now(UTC) - timedelta(days=2),
     )
-    second_listing = CompetitorListing(
+    new_listing = CompetitorListing(
         competitor_id="doktorkladivo_sk",
-        competitor_sku="dk-new",
         brand="Knipex",
-        mpn="87-01-250",
         ean="4003773022022",
-        title="KNIPEX Kliešte inštalatérske Cobra 8701250",
+        title="KNIPEX Cobra 8701250",
         price_eur=Decimal("21.90"),
         currency="EUR",
-        in_stock=True,
         url="https://doktorkladivo.test/cobra-new",
         scraped_at=datetime.now(UTC),
     )
-    session.add_all([product, first_listing, second_listing])
-    session.flush()
-    cluster = ProductCluster(
-        ean="4003773022022",
-        cluster_method="ean",
-        representative_brand="Knipex",
-        representative_title="Kliešte SIKO Cobra 250 mm KNIPEX",
-    )
-    session.add(cluster)
+    session.add_all([product, old_listing, new_listing])
     session.flush()
     session.add_all([
-        ClusterMember(
-            cluster_id=cluster.id,
-            listing_id=first_listing.id,
-            match_method="ean",
-            status="approved",
-        ),
-        ClusterMember(
-            cluster_id=cluster.id,
-            listing_id=second_listing.id,
-            match_method="ean",
-            status="approved",
-        ),
+        ProductMatch(listing_id=old_listing.id, product_id=product.id,
+                     match_type="exact_ean", confidence=Decimal("1.00"), status="approved"),
+        ProductMatch(listing_id=new_listing.id, product_id=product.id,
+                     match_type="exact_ean", confidence=Decimal("1.00"), status="approved"),
     ])
     session.commit()
 
     rows = orchestrator._latest_competitor_listings(product.id, session)
 
-    assert [row.id for row in rows] == [second_listing.id, first_listing.id]
+    assert new_listing.id in [r.id for r in rows]
