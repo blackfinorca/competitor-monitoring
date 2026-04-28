@@ -38,10 +38,8 @@ from sqlalchemy.orm import Session
 
 from agnaradie_pricing.catalogue.normalise import fold_diacritics, normalise_ean
 from agnaradie_pricing.db.models import (
-    ClusterMember,
     CompetitorListing as DBListing,
     Product,
-    ProductCluster,
     ProductMatch,
 )
 from agnaradie_pricing.matching import match_product
@@ -277,10 +275,11 @@ def _preferred_product_by_ean(ean: str, session: Session) -> Product | None:
 
     product_by_id = {product.id: product for product in products}
     toolzone_product_id = session.execute(
-        select(ProductMatch.ag_product_id)
+        select(ProductMatch.product_id)
+        .join(DBListing, DBListing.id == ProductMatch.listing_id)
         .where(
-            ProductMatch.ag_product_id.in_(product_by_id),
-            ProductMatch.competitor_id == "toolzone_sk",
+            ProductMatch.product_id.in_(product_by_id),
+            DBListing.competitor_id == "toolzone_sk",
         )
         .order_by(ProductMatch.created_at.desc(), ProductMatch.id.desc())
         .limit(1)
@@ -381,36 +380,19 @@ def _product_age_hours(product: Product) -> float | None:
 
 
 def _latest_competitor_listings(product_id: int, session: Session) -> list[DBListing]:
-    """Return fresh non-ToolZone listings for the product, newest first."""
+    """Return fresh non-ToolZone approved listings for the product, one per competitor."""
     cutoff = datetime.now(UTC) - timedelta(hours=CACHE_MAX_AGE_HOURS)
-    cluster_rows = _latest_cluster_listings(
-        product_id,
-        session,
-        include_toolzone=False,
-        cutoff=cutoff,
-    )
-    if cluster_rows:
-        return cluster_rows
-
     rows = session.execute(
         select(DBListing)
-        .join(
-            ProductMatch,
-            (ProductMatch.competitor_id == DBListing.competitor_id)
-            & (
-                (ProductMatch.competitor_sku == DBListing.competitor_sku)
-                | (ProductMatch.competitor_sku.is_(None) & DBListing.competitor_sku.is_(None))
-            ),
-        )
+        .join(ProductMatch, ProductMatch.listing_id == DBListing.id)
         .where(
-            ProductMatch.ag_product_id == product_id,
+            ProductMatch.product_id == product_id,
+            ProductMatch.status == "approved",
             DBListing.competitor_id != "toolzone_sk",
             DBListing.scraped_at >= cutoff,
         )
         .order_by(DBListing.scraped_at.desc())
     ).scalars().all()
-
-    # Deduplicate: one row per competitor_id
     seen: set[str] = set()
     result: list[DBListing] = []
     for row in rows:
@@ -421,27 +403,12 @@ def _latest_competitor_listings(product_id: int, session: Session) -> list[DBLis
 
 
 def _latest_tz_listing(product_id: int, session: Session) -> DBListing | None:
-    cluster_rows = _latest_cluster_listings(
-        product_id,
-        session,
-        include_toolzone=True,
-        only_toolzone=True,
-    )
-    if cluster_rows:
-        return cluster_rows[0]
-
     return session.execute(
         select(DBListing)
-        .join(
-            ProductMatch,
-            (ProductMatch.competitor_id == DBListing.competitor_id)
-            & (
-                (ProductMatch.competitor_sku == DBListing.competitor_sku)
-                | (ProductMatch.competitor_sku.is_(None) & DBListing.competitor_sku.is_(None))
-            ),
-        )
+        .join(ProductMatch, ProductMatch.listing_id == DBListing.id)
         .where(
-            ProductMatch.ag_product_id == product_id,
+            ProductMatch.product_id == product_id,
+            ProductMatch.status == "approved",
             DBListing.competitor_id == "toolzone_sk",
         )
         .order_by(DBListing.scraped_at.desc())
@@ -449,79 +416,33 @@ def _latest_tz_listing(product_id: int, session: Session) -> DBListing | None:
     ).scalar_one_or_none()
 
 
-def _latest_cluster_listings(
-    product_id: int,
-    session: Session,
-    *,
-    include_toolzone: bool,
-    only_toolzone: bool = False,
-    cutoff: datetime | None = None,
-) -> list[DBListing]:
-    product = session.get(Product, product_id)
-    if product is None or not product.ean:
-        return []
-
-    filters = [
-        ProductCluster.ean == product.ean,
-        ClusterMember.status == "approved",
-    ]
-    if only_toolzone:
-        filters.append(DBListing.competitor_id == "toolzone_sk")
-    elif not include_toolzone:
-        filters.append(DBListing.competitor_id != "toolzone_sk")
-    if cutoff is not None:
-        filters.append(DBListing.scraped_at >= cutoff)
-
-    return list(session.execute(
-        select(DBListing)
-        .join(ClusterMember, ClusterMember.listing_id == DBListing.id)
-        .join(ProductCluster, ProductCluster.id == ClusterMember.cluster_id)
-        .where(*filters)
-        .order_by(DBListing.scraped_at.desc(), DBListing.id.desc())
-    ).scalars().all())
-
-
 def _product_matches(product_id: int, session: Session) -> list[ProductMatch]:
     return list(session.execute(
-        select(ProductMatch).where(ProductMatch.ag_product_id == product_id)
+        select(ProductMatch).where(
+            ProductMatch.product_id == product_id,
+            ProductMatch.status == "approved",
+        )
     ).scalars().all())
 
 
 def _product_match_info(product_id: int, session: Session) -> dict[tuple[str, str | None], tuple[str, float]]:
-    info: dict[tuple[str, str | None], tuple[str, float]] = {
-        (pm.competitor_id, pm.competitor_sku): (pm.match_type, float(pm.confidence))
-        for pm in _product_matches(product_id, session)
-    }
-
-    product = session.get(Product, product_id)
-    if product is None or not product.ean:
-        return info
-
     rows = session.execute(
-        select(DBListing.competitor_id, DBListing.competitor_sku, ClusterMember.match_method,
-               ClusterMember.similarity, ClusterMember.llm_confidence)
-        .join(ClusterMember, ClusterMember.listing_id == DBListing.id)
-        .join(ProductCluster, ProductCluster.id == ClusterMember.cluster_id)
+        select(
+            DBListing.competitor_id,
+            DBListing.competitor_sku,
+            ProductMatch.match_type,
+            ProductMatch.confidence,
+        )
+        .join(ProductMatch, ProductMatch.listing_id == DBListing.id)
         .where(
-            ProductCluster.ean == product.ean,
-            ClusterMember.status == "approved",
+            ProductMatch.product_id == product_id,
+            ProductMatch.status == "approved",
         )
     ).fetchall()
-
-    method_map = {
-        "ean": "exact_ean",
-        "vector_llm": "llm_fuzzy",
-        "manual": "manual",
+    return {
+        (row.competitor_id, row.competitor_sku): (row.match_type, float(row.confidence))
+        for row in rows
     }
-    for row in rows:
-        confidence = row.llm_confidence or row.similarity
-        if row.match_method == "ean" and confidence is None:
-            confidence = Decimal("1.00")
-        info[(row.competitor_id, row.competitor_sku)] = (
-            method_map.get(row.match_method, row.match_method),
-            float(confidence) if confidence is not None else 0.0,
-        )
-    return info
 
 
 # ---------------------------------------------------------------------------
@@ -612,22 +533,31 @@ def _save_toolzone_listing(listing: CompetitorListing, session: Session) -> None
     if product is None:
         return
 
-    # Upsert the self-match so the dashboard can find the ToolZone card
-    existing_match = session.execute(
-        select(ProductMatch).where(
-            ProductMatch.ag_product_id == product.id,
-            ProductMatch.competitor_id == "toolzone_sk",
-            ProductMatch.competitor_sku == listing.competitor_sku,
+    # Upsert the self-match so the dashboard can find the ToolZone listing
+    tz_listing_row = session.execute(
+        select(DBListing)
+        .where(
+            DBListing.competitor_id == "toolzone_sk",
+            DBListing.url == listing.url,
         )
+        .order_by(DBListing.scraped_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if tz_listing_row is None:
+        return
+
+    existing_match = session.execute(
+        select(ProductMatch).where(ProductMatch.listing_id == tz_listing_row.id)
     ).scalar_one_or_none()
 
     if existing_match is None:
         session.add(ProductMatch(
-            ag_product_id=product.id,
-            competitor_id="toolzone_sk",
-            competitor_sku=listing.competitor_sku,
+            listing_id=tz_listing_row.id,
+            product_id=product.id,
             match_type="exact_ean" if listing.ean else "exact_mpn",
             confidence=Decimal("1.00"),
+            status="approved",
         ))
 
 
@@ -695,7 +625,7 @@ def _match_and_save(
     *,
     llm_client=None,
 ) -> ProductMatch | None:
-    """Run match_product and upsert result into product_matches."""
+    """Run match_product for a live-search result and upsert into product_matches."""
     product_dict: dict[str, Any] = {
         "id": product.id,
         "brand": product.brand,
@@ -716,26 +646,23 @@ def _match_and_save(
 
     match_type, confidence = match_result
 
-    # Upsert
     existing = session.execute(
-        select(ProductMatch).where(
-            ProductMatch.ag_product_id == product.id,
-            ProductMatch.competitor_id == listing.competitor_id,
-            ProductMatch.competitor_sku == listing.competitor_sku,
-        )
+        select(ProductMatch).where(ProductMatch.listing_id == listing_row.id)
     ).scalar_one_or_none()
 
     if existing:
+        existing.product_id = product.id
         existing.match_type = match_type
         existing.confidence = Decimal(str(confidence))
+        existing.status = "approved"
         return existing
 
     pm = ProductMatch(
-        ag_product_id=product.id,
-        competitor_id=listing.competitor_id,
-        competitor_sku=listing.competitor_sku,
+        listing_id=listing_row.id,
+        product_id=product.id,
         match_type=match_type,
         confidence=Decimal(str(confidence)),
+        status="approved",
     )
     session.add(pm)
     return pm

@@ -1,8 +1,7 @@
 """Data-loading layer for the Product Overview / Seller dashboard.
 
-Exposes :func:`load_seller_dashboard_data`, which reads approved cluster
-membership from the configured database and returns an aggregated payload
-suitable for the Streamlit Product Overview page.
+Exposes :func:`load_seller_dashboard_data`, which reads approved product_matches
+and returns an aggregated payload suitable for the Streamlit Product Overview page.
 """
 
 from __future__ import annotations
@@ -26,15 +25,15 @@ from agnaradie_pricing.settings import Settings  # noqa: E402
 
 _SQL = text(
     """
-    SELECT pc.id                    AS cluster_id,
-           pc.ean                   AS ean,
-           pc.representative_title  AS representative_title,
+    SELECT p.id                     AS cluster_id,
+           p.ean                    AS ean,
+           p.title                  AS representative_title,
            cl.competitor_id         AS competitor_id,
            cl.price_eur             AS price_eur
-    FROM   product_clusters pc
-    JOIN   cluster_members  cm ON cm.cluster_id = pc.id
-    JOIN   competitor_listings cl ON cl.id = cm.listing_id
-    WHERE  cm.status = 'approved'
+    FROM   product_matches pm
+    JOIN   products p  ON p.id  = pm.product_id
+    JOIN   competitor_listings cl ON cl.id = pm.listing_id
+    WHERE  pm.status = 'approved'
     """
 )
 

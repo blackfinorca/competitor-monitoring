@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+# Boolean kept for CompetitorListing.in_stock and Recommendation fields
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -32,7 +33,7 @@ class Product(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    sku: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    sku: Mapped[str | None] = mapped_column(Text, unique=True)
     brand: Mapped[str | None] = mapped_column(Text)
     mpn: Mapped[str | None] = mapped_column(Text)
     ean: Mapped[str | None] = mapped_column(Text)
@@ -41,6 +42,8 @@ class Product(Base):
     price_eur: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     stock: Mapped[int | None] = mapped_column(Integer)
+    # 'toolzone' = from our catalogue; 'derived' = auto-created from competitor listing
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="toolzone")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -73,59 +76,37 @@ class CompetitorListing(Base):
     )
 
 
-class ListingMatch(Base):
-    """Cross-listing match: ToolZone reference listing → competitor listing.
-
-    Populated by jobs/match_products.py.  One row per (toolzone_listing, competitor_listing) pair.
-    The unique constraint prevents duplicate matches on re-runs.
-    """
-    __tablename__ = "listing_matches"
-    __table_args__ = (
-        UniqueConstraint(
-            "toolzone_listing_id",
-            "competitor_listing_id",
-            name="uq_listing_match",
-        ),
-        Index("idx_lm_toolzone", "toolzone_listing_id"),
-        Index("idx_lm_competitor", "competitor_listing_id"),
-    )
-
-    id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
-    )
-    toolzone_listing_id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), nullable=False
-    )
-    competitor_listing_id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), nullable=False
-    )
-    match_type: Mapped[str] = mapped_column(Text, nullable=False)   # exact_ean / llm_fuzzy / …
-    confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-
 class ProductMatch(Base):
+    """One row per competitor listing that has been matched to a product.
+
+    listing_id is unique — each listing belongs to at most one product.
+    status: approved (auto or human), pending (awaiting review), rejected.
+    """
     __tablename__ = "product_matches"
     __table_args__ = (
-        UniqueConstraint(
-            "ag_product_id",
-            "competitor_id",
-            "competitor_sku",
-            name="uq_product_matches_product_competitor_sku",
-        ),
+        UniqueConstraint("listing_id", name="uq_product_match_listing"),
+        Index("idx_pm_product", "product_id"),
+        Index("idx_pm_status", "status"),
     )
 
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True
     )
-    ag_product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"))
-    competitor_id: Mapped[str] = mapped_column(Text, nullable=False)
-    competitor_sku: Mapped[str | None] = mapped_column(Text)
+    listing_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("competitor_listings.id"),
+        nullable=False,
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id"), nullable=False
+    )
     match_type: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False)
-    verified_by_human: Mapped[bool] = mapped_column(Boolean, default=False)
+    similarity: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    llm_confidence: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="approved")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewer: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -152,59 +133,6 @@ class PricingSnapshot(Base):
     ag_rank: Mapped[int | None] = mapped_column(Integer)
     cheapest_competitor: Mapped[str | None] = mapped_column(Text)
 
-
-class ProductCluster(Base):
-    """Cross-store product cluster.
-
-    One row per logical product. Members live in `cluster_members` and reference
-    `competitor_listings` rows from any store (including ToolZone).
-    EAN-based clusters carry a unique `ean`; fuzzy LLM-built clusters have ean=NULL.
-    """
-    __tablename__ = "product_clusters"
-    __table_args__ = (
-        Index("idx_pc_ean", "ean"),
-    )
-
-    id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
-    )
-    ean: Mapped[str | None] = mapped_column(Text, unique=True)
-    cluster_method: Mapped[str] = mapped_column(Text, nullable=False)  # 'ean' | 'fuzzy'
-    representative_brand: Mapped[str | None] = mapped_column(Text)
-    representative_title: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-
-class ClusterMember(Base):
-    """Membership of a competitor listing in a product cluster."""
-    __tablename__ = "cluster_members"
-    __table_args__ = (
-        UniqueConstraint("cluster_id", "listing_id", name="uq_cm_cluster_listing"),
-        UniqueConstraint("listing_id", name="uq_cm_listing"),
-        Index("idx_cm_cluster", "cluster_id"),
-        Index("idx_cm_status", "status"),
-    )
-
-    id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
-    )
-    cluster_id: Mapped[int] = mapped_column(
-        ForeignKey("product_clusters.id"), nullable=False
-    )
-    listing_id: Mapped[int] = mapped_column(
-        ForeignKey("competitor_listings.id"), nullable=False
-    )
-    match_method: Mapped[str] = mapped_column(Text, nullable=False)  # 'ean' | 'vector_llm' | 'manual'
-    similarity: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
-    llm_confidence: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="approved")
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    reviewer: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
 
 
 class Recommendation(Base):

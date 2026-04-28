@@ -538,12 +538,8 @@ def _product_search_match_lookup(
     matches,
     extra_match_info: dict[tuple[str, str | None], tuple[str, float]] | None = None,
 ) -> dict[tuple[str, str | None], tuple[str, float]]:
-    lookup: dict[tuple[str, str | None], tuple[str, float]] = {}
-    for pm in matches:
-        lookup[(pm.competitor_id, pm.competitor_sku)] = (pm.match_type, float(pm.confidence))
-    if extra_match_info:
-        lookup.update(extra_match_info)
-    return lookup
+    # matches list is no longer used — match_info covers all cases via product_matches join
+    return dict(extra_match_info) if extra_match_info else {}
 
 
 def _render_search_tab() -> None:
@@ -820,13 +816,14 @@ def _load_price_compare_data() -> dict:
         rows = session.execute(
             text(
                 """
-                SELECT pc.id            AS cluster_id,
-                       pc.ean           AS ean,
-                       pc.cluster_method AS method,
-                       pc.representative_brand AS rep_brand,
-                       pc.representative_title AS rep_title,
-                       cm.match_method  AS match_method,
-                       cm.llm_confidence AS llm_confidence,
+                SELECT p.id             AS product_id,
+                       p.ean            AS ean,
+                       p.brand          AS rep_brand,
+                       p.title          AS rep_title,
+                       p.source         AS source,
+                       pm.match_type    AS match_type,
+                       pm.llm_confidence AS llm_confidence,
+                       pm.status        AS status,
                        cl.id            AS listing_id,
                        cl.competitor_id AS competitor_id,
                        cl.brand         AS brand,
@@ -835,10 +832,10 @@ def _load_price_compare_data() -> dict:
                        cl.url           AS url,
                        cl.in_stock      AS in_stock,
                        cl.scraped_at    AS scraped_at
-                FROM   product_clusters pc
-                JOIN   cluster_members cm ON cm.cluster_id = pc.id
-                JOIN   competitor_listings cl ON cl.id = cm.listing_id
-                WHERE  cm.status = 'approved'
+                FROM   product_matches pm
+                JOIN   products p  ON p.id  = pm.product_id
+                JOIN   competitor_listings cl ON cl.id = pm.listing_id
+                WHERE  pm.status = 'approved'
                 """
             )
         ).fetchall()
@@ -846,13 +843,13 @@ def _load_price_compare_data() -> dict:
     clusters: dict[int, dict] = {}
     for r in rows:
         cl = clusters.setdefault(
-            r.cluster_id,
+            r.product_id,
             {
-                "ean":      r.ean,
-                "method":   r.method,
-                "brand":    r.rep_brand,
-                "title":    r.rep_title,
-                "members":  [],
+                "ean":     r.ean,
+                "method":  r.source,
+                "brand":   r.rep_brand,
+                "title":   r.rep_title,
+                "members": [],
             },
         )
         is_tz = r.competitor_id == "toolzone_sk"
@@ -866,7 +863,7 @@ def _load_price_compare_data() -> dict:
             "in_stock":       r.in_stock,
             "scraped_at":     r.scraped_at,
             "is_toolzone":    is_tz,
-            "match_method":   r.match_method,
+            "match_method":   r.match_type,
             "llm_confidence": float(r.llm_confidence) if r.llm_confidence is not None else None,
         })
         if is_tz:
@@ -1387,27 +1384,20 @@ def _load_product_overview_data() -> dict:
                 SELECT cl.competitor_id,
                        COUNT(DISTINCT cl.id) AS matches
                 FROM competitor_listings cl
-                WHERE cl.id IN (
-                    SELECT lm.competitor_listing_id
-                    FROM listing_matches lm
-                    WHERE lm.confidence >= 0.72
-                    UNION
-                    SELECT cm.listing_id
-                    FROM cluster_members cm
-                    WHERE cm.status = 'approved'
-                )
+                JOIN product_matches pm ON pm.listing_id = cl.id
+                WHERE pm.status = 'approved'
                 GROUP BY cl.competitor_id
             """)
         ).fetchall()
 
         membership_rows = session.execute(
             text("""
-                SELECT cm.cluster_id   AS cluster_id,
+                SELECT pm.product_id   AS cluster_id,
                        cl.competitor_id AS competitor_id,
                        cl.price_eur    AS price_eur
-                FROM   cluster_members cm
-                JOIN   competitor_listings cl ON cl.id = cm.listing_id
-                WHERE  cm.status = 'approved'
+                FROM   product_matches pm
+                JOIN   competitor_listings cl ON cl.id = pm.listing_id
+                WHERE  pm.status = 'approved'
             """)
         ).fetchall()
 
@@ -1498,7 +1488,7 @@ def _render_product_overview_tab() -> None:
 
     seller_data = _load_seller_dashboard_data_cached()
     if seller_data["offers_total"] == 0:
-        st.info("No clustered offers yet — approve cluster matches to populate the seller dashboard.")
+        st.info("No matched offers yet — run `python jobs/run_matching.py` then approve pending matches.")
     else:
         render_seller_dashboard(seller_data, theme=_dashboard_theme)
 
@@ -1675,8 +1665,8 @@ order — the first layer that fires wins. Higher confidence = stronger evidence
 | 4 | `regex_ean` | EAN extracted from listing title matches | **0.95** |
 | 5 *(opt-in)* | `llm_fuzzy` | gpt-5-nano title/spec similarity after vector retrieval | **≥ 0.85** |
 
-Coverage uses all-time competitor listings as the denominator and matched listings
-from `listing_matches` plus approved `cluster_members` as the numerator.
+Coverage uses all-time competitor listings as the denominator and approved rows
+from `product_matches` as the numerator.
 """)
 
     with notes_right:
@@ -1714,18 +1704,14 @@ from `listing_matches` plus approved `cluster_members` as the numerator.
 
 @st.cache_data(ttl=300, show_spinner="Loading manufacturer data…")
 def _load_manufacturer_data(manufacturer: str) -> dict:
-    """Load all competitor listings for a given manufacturer brand.
-
-    Uses listing_matches as the source of truth so EAN, MPN, regex and LLM
-    matches all appear in the UI.
+    """Load all approved competitor listings for a manufacturer brand via product_matches.
 
     Returns:
         toolzone: list of {id, ean, title, price_eur, in_stock, url, scraped_at}
-        competitors: {tz_id: {competitor_id: {price_eur, in_stock, url, scraped_at, match_type}}}
-        competitor_ids: sorted list of active competitor IDs found in data
+        competitors: {tz_listing_id: {competitor_id: {price_eur, in_stock, url, scraped_at, match_type}}}
+        competitor_ids: sorted list of active competitor IDs
     """
     with _session() as session:
-        # All ToolZone products for this brand (latest scrape per URL)
         tz_rows = session.execute(
             text("""
                 SELECT id, ean, title, price_eur, in_stock, url, scraped_at
@@ -1740,37 +1726,34 @@ def _load_manufacturer_data(manufacturer: str) -> dict:
         if not tz_rows:
             return {"toolzone": [], "competitors": {}, "competitor_ids": []}
 
-        # All competitor matches via listing_matches (covers EAN, MPN, regex, LLM)
+        # All competitor listings sharing the same product as any ToolZone listing
         tz_ids = [r.id for r in tz_rows]
         placeholders = ",".join(str(i) for i in tz_ids)
         comp_rows = session.execute(
             text(f"""
                 SELECT
-                    lm.toolzone_listing_id  AS tz_id,
-                    lm.match_type,
-                    lm.confidence,
+                    tz_pm.listing_id    AS tz_id,
+                    pm.match_type,
+                    pm.confidence,
                     cl.competitor_id,
                     cl.price_eur,
                     cl.in_stock,
                     cl.url,
                     cl.scraped_at
-                FROM listing_matches lm
-                JOIN competitor_listings cl ON cl.id = lm.competitor_listing_id
-                WHERE lm.toolzone_listing_id IN ({placeholders})
-                  AND cl.scraped_at = (
-                      SELECT MAX(cl2.scraped_at)
-                      FROM competitor_listings cl2
-                      WHERE cl2.id = lm.competitor_listing_id
-                  )
+                FROM product_matches tz_pm
+                JOIN product_matches pm  ON pm.product_id = tz_pm.product_id
+                                        AND pm.listing_id != tz_pm.listing_id
+                JOIN competitor_listings cl ON cl.id = pm.listing_id
+                WHERE tz_pm.listing_id IN ({placeholders})
+                  AND pm.status = 'approved'
+                  AND cl.competitor_id != 'toolzone_sk'
             """)
         ).fetchall()
 
-    competitors: dict[int, dict[str, dict]] = {}  # tz_id → {cid → data}
+    competitors: dict[int, dict[str, dict]] = {}
     comp_ids: set[str] = set()
     for row in comp_rows:
-        if row.tz_id not in competitors:
-            competitors[row.tz_id] = {}
-        # Keep lowest price if same competitor appears via multiple match paths
+        competitors.setdefault(row.tz_id, {})
         existing = competitors[row.tz_id].get(row.competitor_id)
         price = float(row.price_eur) if row.price_eur else None
         if existing is None or (price and price < existing["price_eur"]):
@@ -2038,41 +2021,56 @@ def _load_comparison_data(ref_id: str, opp_ids: tuple[str, ...], min_confidence:
     def _fetch_pair(session, ref: str, opp: str, min_conf: float) -> list:
         if ref == "toolzone_sk":
             return session.execute(text("""
-                SELECT cl_tz.title, cl_tz.brand,
-                       cl_tz.price_eur  AS ref_price, cl_tz.url  AS ref_url,
+                SELECT p.title, p.brand,
+                       cl_ref.price_eur AS ref_price, cl_ref.url AS ref_url,
                        cl_opp.price_eur AS opp_price, cl_opp.url AS opp_url
-                FROM   listing_matches lm
-                JOIN   competitor_listings cl_tz  ON cl_tz.id  = lm.toolzone_listing_id
-                JOIN   competitor_listings cl_opp ON cl_opp.id = lm.competitor_listing_id
-                                                 AND cl_opp.competitor_id = :opp
-                WHERE  lm.confidence >= :mc
-                ORDER  BY cl_tz.brand, cl_tz.title
-            """), {"opp": opp, "mc": min_conf}).fetchall()
+                FROM   product_matches pm_ref
+                JOIN   product_matches pm_opp ON pm_opp.product_id = pm_ref.product_id
+                JOIN   competitor_listings cl_ref ON cl_ref.id = pm_ref.listing_id
+                JOIN   competitor_listings cl_opp ON cl_opp.id = pm_opp.listing_id
+                JOIN   products p ON p.id = pm_ref.product_id
+                WHERE  cl_ref.competitor_id = :ref
+                  AND  cl_opp.competitor_id = :opp
+                  AND  pm_ref.confidence >= :mc
+                  AND  pm_opp.confidence >= :mc
+                  AND  pm_ref.status = 'approved'
+                  AND  pm_opp.status = 'approved'
+                ORDER  BY p.brand, p.title
+            """), {"ref": ref, "opp": opp, "mc": min_conf}).fetchall()
         if opp == "toolzone_sk":
             return session.execute(text("""
-                SELECT cl_tz.title, cl_tz.brand,
+                SELECT p.title, p.brand,
                        cl_ref.price_eur AS ref_price, cl_ref.url AS ref_url,
-                       cl_tz.price_eur  AS opp_price, cl_tz.url  AS opp_url
-                FROM   listing_matches lm
-                JOIN   competitor_listings cl_tz  ON cl_tz.id  = lm.toolzone_listing_id
-                JOIN   competitor_listings cl_ref ON cl_ref.id = lm.competitor_listing_id
-                                                 AND cl_ref.competitor_id = :ref
-                WHERE  lm.confidence >= :mc
-                ORDER  BY cl_tz.brand, cl_tz.title
-            """), {"ref": ref, "mc": min_conf}).fetchall()
+                       cl_opp.price_eur AS opp_price, cl_opp.url AS opp_url
+                FROM   product_matches pm_ref
+                JOIN   product_matches pm_opp ON pm_opp.product_id = pm_ref.product_id
+                JOIN   competitor_listings cl_ref ON cl_ref.id = pm_ref.listing_id
+                JOIN   competitor_listings cl_opp ON cl_opp.id = pm_opp.listing_id
+                JOIN   products p ON p.id = pm_ref.product_id
+                WHERE  cl_ref.competitor_id = :ref
+                  AND  cl_opp.competitor_id = :opp
+                  AND  pm_ref.confidence >= :mc
+                  AND  pm_opp.confidence >= :mc
+                  AND  pm_ref.status = 'approved'
+                  AND  pm_opp.status = 'approved'
+                ORDER  BY p.brand, p.title
+            """), {"ref": ref, "opp": opp, "mc": min_conf}).fetchall()
         return session.execute(text("""
-            SELECT cl_tz.title, cl_tz.brand,
+            SELECT p.title, p.brand,
                    cl_ref.price_eur AS ref_price, cl_ref.url AS ref_url,
                    cl_opp.price_eur AS opp_price, cl_opp.url AS opp_url
-            FROM   listing_matches lm_ref
-            JOIN   competitor_listings cl_ref ON cl_ref.id = lm_ref.competitor_listing_id
-                                             AND cl_ref.competitor_id = :ref
-            JOIN   listing_matches lm_opp    ON lm_opp.toolzone_listing_id = lm_ref.toolzone_listing_id
-            JOIN   competitor_listings cl_opp ON cl_opp.id = lm_opp.competitor_listing_id
-                                             AND cl_opp.competitor_id = :opp
-            JOIN   competitor_listings cl_tz  ON cl_tz.id = lm_ref.toolzone_listing_id
-            WHERE  lm_ref.confidence >= :mc AND lm_opp.confidence >= :mc
-            ORDER  BY cl_tz.brand, cl_tz.title
+            FROM   product_matches pm_ref
+            JOIN   product_matches pm_opp ON pm_opp.product_id = pm_ref.product_id
+            JOIN   competitor_listings cl_ref ON cl_ref.id = pm_ref.listing_id
+            JOIN   competitor_listings cl_opp ON cl_opp.id = pm_opp.listing_id
+            JOIN   products p ON p.id = pm_ref.product_id
+            WHERE  cl_ref.competitor_id = :ref
+              AND  cl_opp.competitor_id = :opp
+              AND  pm_ref.confidence >= :mc
+              AND  pm_opp.confidence >= :mc
+              AND  pm_ref.status = 'approved'
+              AND  pm_opp.status = 'approved'
+            ORDER  BY p.brand, p.title
         """), {"ref": ref, "opp": opp, "mc": min_conf}).fetchall()
 
     def _summarise(rows: list[dict]) -> dict:
@@ -2442,67 +2440,67 @@ _MATCH_REVIEW_AUTO_APPROVE_SIMILARITY = 0.96
 
 
 def _load_matching_review(status_filter: str) -> list[dict]:
-    """Return fuzzy ClusterMember rows joined with the orphan listing and a peer member.
+    """Return vector_llm product_matches rows for human review.
 
-    status_filter ∈ {'pending', 'approved', 'all'}
+    status_filter ∈ {'pending', 'approved', 'rejected', 'all'}
     """
-    where = "cm.match_method = 'vector_llm'"
+    where = "pm.match_type = 'vector_llm'"
     if status_filter == "pending":
-        where += " AND cm.status = 'pending'"
+        where += " AND pm.status = 'pending'"
     elif status_filter == "approved":
-        where += " AND cm.status = 'approved'"
+        where += " AND pm.status = 'approved'"
     elif status_filter == "rejected":
-        where += " AND cm.status = 'rejected'"
+        where += " AND pm.status = 'rejected'"
 
     with _session() as session:
         rows = session.execute(
             text(
                 f"""
-                SELECT cm.id              AS member_id,
-                       cm.cluster_id      AS cluster_id,
-                       cm.status          AS status,
-                       cm.similarity      AS similarity,
-                       cm.llm_confidence  AS llm_confidence,
-                       cm.created_at      AS created_at,
-                       cm.reviewed_at     AS reviewed_at,
-                       cm.reviewer        AS reviewer,
+                SELECT pm.id              AS member_id,
+                       pm.product_id      AS cluster_id,
+                       pm.status          AS status,
+                       pm.similarity      AS similarity,
+                       pm.llm_confidence  AS llm_confidence,
+                       pm.created_at      AS created_at,
+                       pm.reviewed_at     AS reviewed_at,
+                       pm.reviewer        AS reviewer,
                        cl.id              AS listing_id,
                        cl.competitor_id   AS competitor_id,
                        cl.brand           AS brand,
                        cl.title           AS title,
                        cl.price_eur       AS price_eur,
                        cl.url             AS url,
-                       pc.ean             AS cluster_ean,
-                       pc.representative_title AS cluster_title,
-                       pc.representative_brand AS cluster_brand
-                FROM   cluster_members cm
-                JOIN   competitor_listings cl ON cl.id = cm.listing_id
-                JOIN   product_clusters pc    ON pc.id = cm.cluster_id
+                       p.ean              AS cluster_ean,
+                       p.title            AS cluster_title,
+                       p.brand            AS cluster_brand
+                FROM   product_matches pm
+                JOIN   competitor_listings cl ON cl.id = pm.listing_id
+                JOIN   products p             ON p.id  = pm.product_id
                 WHERE  {where}
-                ORDER  BY cm.created_at DESC, cm.id DESC
+                ORDER  BY pm.created_at DESC, pm.id DESC
                 """
             )
         ).fetchall()
     return [dict(r._mapping) for r in rows]
 
 
-def _load_cluster_peers(cluster_ids: list[int]) -> dict[int, list[dict]]:
-    """Return non-fuzzy approved peer members for the given clusters (for context)."""
-    if not cluster_ids:
+def _load_cluster_peers(product_ids: list[int]) -> dict[int, list[dict]]:
+    """Return approved peer listings for the given product_ids."""
+    if not product_ids:
         return {}
-    ids_csv = ",".join(str(int(c)) for c in cluster_ids)
+    ids_csv = ",".join(str(int(p)) for p in product_ids)
     with _session() as session:
         rows = session.execute(
             text(
                 f"""
-                SELECT cm.cluster_id AS cluster_id,
-                       cl.competitor_id AS competitor_id,
-                       cl.title AS title,
-                       cl.price_eur AS price_eur
-                FROM   cluster_members cm
-                JOIN   competitor_listings cl ON cl.id = cm.listing_id
-                WHERE  cm.cluster_id IN ({ids_csv})
-                  AND  cm.status = 'approved'
+                SELECT pm.product_id     AS cluster_id,
+                       cl.competitor_id  AS competitor_id,
+                       cl.title          AS title,
+                       cl.price_eur      AS price_eur
+                FROM   product_matches pm
+                JOIN   competitor_listings cl ON cl.id = pm.listing_id
+                WHERE  pm.product_id IN ({ids_csv})
+                  AND  pm.status = 'approved'
                 """
             )
         ).fetchall()
@@ -2521,7 +2519,7 @@ def _set_member_status(member_id: int, new_status: str) -> None:
         session.execute(
             text(
                 """
-                UPDATE cluster_members
+                UPDATE product_matches
                 SET status = :s,
                     reviewed_at = CURRENT_TIMESTAMP,
                     reviewer = :r
@@ -2541,7 +2539,7 @@ def _approve_pending_members(member_ids: list[int]) -> int:
 
     stmt = text(
         """
-        UPDATE cluster_members
+        UPDATE product_matches
         SET status = 'approved',
             reviewed_at = CURRENT_TIMESTAMP,
             reviewer = :reviewer
@@ -2569,12 +2567,12 @@ def _auto_approve_high_similarity_matches() -> int:
             result = session.execute(
                 text(
                     """
-                    UPDATE cluster_members
+                    UPDATE product_matches
                     SET status = 'approved',
                         reviewed_at = CURRENT_TIMESTAMP,
                         reviewer = :reviewer
                     WHERE status = 'pending'
-                      AND match_method = 'vector_llm'
+                      AND match_type = 'vector_llm'
                       AND similarity >= :threshold
                     """
                 ),
@@ -2635,8 +2633,8 @@ def _render_matching_review_tab() -> None:
             text(
                 """
                 SELECT status, COUNT(*) AS n
-                FROM   cluster_members
-                WHERE  match_method = 'vector_llm'
+                FROM   product_matches
+                WHERE  match_type = 'vector_llm'
                 GROUP  BY status
                 """
             )

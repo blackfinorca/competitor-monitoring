@@ -48,15 +48,20 @@ class _FakeStreamlit:
     session_state: dict[str, object] = {}
 
 
-def test_approve_pending_members_updates_only_selected_pending_rows() -> None:
-    helpers = _load_matching_review_helpers()
+def _make_product_matches_db():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
-                CREATE TABLE cluster_members (
+                CREATE TABLE product_matches (
                     id INTEGER PRIMARY KEY,
+                    listing_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    match_type TEXT NOT NULL,
+                    confidence NUMERIC,
+                    similarity NUMERIC,
+                    llm_confidence NUMERIC,
                     status TEXT NOT NULL,
                     reviewed_at TEXT,
                     reviewer TEXT
@@ -64,15 +69,23 @@ def test_approve_pending_members_updates_only_selected_pending_rows() -> None:
                 """
             )
         )
+    return engine
+
+
+def test_approve_pending_members_updates_only_selected_pending_rows() -> None:
+    helpers = _load_matching_review_helpers()
+    engine = _make_product_matches_db()
+    with engine.begin() as conn:
         conn.execute(
             text(
                 """
-                INSERT INTO cluster_members (id, status, reviewed_at, reviewer)
+                INSERT INTO product_matches
+                    (id, listing_id, product_id, match_type, confidence, status, reviewed_at, reviewer)
                 VALUES
-                    (1, 'pending', NULL, NULL),
-                    (2, 'pending', NULL, NULL),
-                    (3, 'approved', NULL, NULL),
-                    (4, 'pending', NULL, NULL)
+                    (1, 1, 10, 'vector_llm', 0.88, 'pending', NULL, NULL),
+                    (2, 2, 10, 'vector_llm', 0.88, 'pending', NULL, NULL),
+                    (3, 3, 11, 'vector_llm', 0.92, 'approved', NULL, NULL),
+                    (4, 4, 12, 'vector_llm', 0.85, 'pending', NULL, NULL)
                 """
             )
         )
@@ -95,7 +108,7 @@ def test_approve_pending_members_updates_only_selected_pending_rows() -> None:
         rows = {
             row.id: dict(row._mapping)
             for row in conn.execute(
-                text("SELECT id, status, reviewed_at, reviewer FROM cluster_members ORDER BY id")
+                text("SELECT id, status, reviewed_at, reviewer FROM product_matches ORDER BY id")
             )
         }
 
@@ -141,34 +154,19 @@ def test_sync_matching_review_selection_only_updates_session_state() -> None:
 
 def test_auto_approve_high_similarity_matches_approves_pending_rows_only() -> None:
     helpers = _load_matching_review_helpers()
-    engine = create_engine("sqlite+pysqlite:///:memory:")
+    engine = _make_product_matches_db()
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
-                CREATE TABLE cluster_members (
-                    id INTEGER PRIMARY KEY,
-                    match_method TEXT NOT NULL,
-                    similarity NUMERIC,
-                    llm_confidence NUMERIC,
-                    status TEXT NOT NULL,
-                    reviewed_at TEXT,
-                    reviewer TEXT
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                """
-                INSERT INTO cluster_members (
-                    id, match_method, similarity, llm_confidence, status, reviewed_at, reviewer
-                )
+                INSERT INTO product_matches
+                    (id, listing_id, product_id, match_type, similarity, llm_confidence,
+                     confidence, status, reviewed_at, reviewer)
                 VALUES
-                    (1, 'vector_llm', 0.960, 0.10, 'pending', NULL, NULL),
-                    (2, 'vector_llm', 0.959, 0.99, 'pending', NULL, NULL),
-                    (3, 'vector_llm', 0.990, NULL, 'rejected', NULL, 'human'),
-                    (4, 'ean',        1.000, NULL, 'pending', NULL, NULL)
+                    (1, 1, 10, 'vector_llm', 0.960, 0.10, 0.10, 'pending',  NULL, NULL),
+                    (2, 2, 10, 'vector_llm', 0.959, 0.99, 0.99, 'pending',  NULL, NULL),
+                    (3, 3, 11, 'vector_llm', 0.990, NULL, 0.90, 'rejected', NULL, 'human'),
+                    (4, 4, 12, 'exact_ean',  1.000, NULL, 1.00, 'pending',  NULL, NULL)
                 """
             )
         )
@@ -190,7 +188,7 @@ def test_auto_approve_high_similarity_matches_approves_pending_rows_only() -> No
         rows = {
             row.id: dict(row._mapping)
             for row in conn.execute(
-                text("SELECT id, status, reviewer, reviewed_at FROM cluster_members ORDER BY id")
+                text("SELECT id, status, reviewer, reviewed_at FROM product_matches ORDER BY id")
             )
         }
 
@@ -214,7 +212,7 @@ def test_auto_approve_high_similarity_matches_handles_database_lock() -> None:
             return False
 
         def execute(self, *_args, **_kwargs):
-            raise OperationalError("UPDATE cluster_members", {}, Exception("database is locked"))
+            raise OperationalError("UPDATE product_matches", {}, Exception("database is locked"))
 
     helpers["_session"] = lambda: LockedSession()
     clearable = _Clearable()
