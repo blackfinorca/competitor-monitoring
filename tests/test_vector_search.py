@@ -1,4 +1,8 @@
-from agnaradie_pricing.matching.vector_search import HashingTextEmbedder, TitleVectorIndex
+from agnaradie_pricing.matching.vector_search import (
+    HashingTextEmbedder,
+    TitleVectorIndex,
+    make_default_embedder,
+)
 
 
 def test_title_vector_index_returns_similar_products_first() -> None:
@@ -66,3 +70,35 @@ def test_title_vector_index_exposes_backend_description() -> None:
     index = TitleVectorIndex([], embedder=HashingTextEmbedder(dimensions=64))
 
     assert index.backend_description == "hashing-fallback(dimensions=64)"
+
+
+def test_default_embedder_uses_hashing_without_opt_in(monkeypatch) -> None:
+    monkeypatch.delenv("MATCHING_EMBEDDING_BACKEND", raising=False)
+
+    embedder = make_default_embedder()
+
+    assert isinstance(embedder, HashingTextEmbedder)
+
+
+def test_default_embedder_allows_sentence_transformers_opt_in(monkeypatch) -> None:
+    created = []
+
+    class _FakeSentenceEmbedder:
+        model_name = "fake-model"
+
+        def __init__(self) -> None:
+            created.append(True)
+
+        def encode(self, texts):
+            return [[1.0] for _text in texts]
+
+    monkeypatch.setenv("MATCHING_EMBEDDING_BACKEND", "sentence-transformers")
+    monkeypatch.setattr(
+        "agnaradie_pricing.matching.vector_search.SentenceTransformerEmbedder",
+        _FakeSentenceEmbedder,
+    )
+
+    embedder = make_default_embedder()
+
+    assert isinstance(embedder, _FakeSentenceEmbedder)
+    assert created == [True]

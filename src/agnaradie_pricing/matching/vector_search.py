@@ -55,6 +55,17 @@ class HashingTextEmbedder:
 
 
 def make_default_embedder() -> TextEmbedder:
+    backend = os.getenv("MATCHING_EMBEDDING_BACKEND", "hashing").strip().lower()
+    if backend in {"hashing", "hash", "fallback"}:
+        return HashingTextEmbedder()
+
+    if backend not in {"sentence-transformers", "sentence_transformers", "st", "auto"}:
+        logger.warning(
+            "Unknown MATCHING_EMBEDDING_BACKEND=%r; using hashing vector search",
+            backend,
+        )
+        return HashingTextEmbedder()
+
     try:
         return SentenceTransformerEmbedder()
     except Exception as exc:

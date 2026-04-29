@@ -24,6 +24,20 @@ class _UnusedLlm:
         raise AssertionError("LLM should not be called without vector candidates")
 
 
+class _CountingEmbedder:
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _text in texts]
+
+
+class _RecordingVectorIndex:
+    embedders = []
+
+    def __init__(self, products, *, embedder=None, **_kwargs) -> None:
+        self._vectors = [[1.0, 0.0] for _item in products]
+        self.backend_description = "recording"
+        self.embedders.append(embedder)
+
+
 def _session():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -132,3 +146,40 @@ def test_run_matching_llm_only_skips_exact_and_derived_paths(monkeypatch) -> Non
     assert counts["derived"] == 0
     assert counts["skipped"] == 1
     assert session.scalars(select(ProductMatch)).all() == []
+
+
+def test_run_matching_reuses_one_embedder_for_phase_2(monkeypatch) -> None:
+    session = _session()
+    session.add_all(
+        [
+            Product(sku="p-acme", brand="Acme", title="Acme catalogue"),
+            Product(sku="p-beta", brand="Beta", title="Beta catalogue"),
+            _listing(
+                title="Acme listing",
+                brand="Acme",
+                url="https://example.test/acme",
+            ),
+            _listing(
+                title="Beta listing",
+                brand="Beta",
+                url="https://example.test/beta",
+            ),
+        ]
+    )
+    session.commit()
+
+    created = []
+
+    def _make_embedder():
+        embedder = _CountingEmbedder()
+        created.append(embedder)
+        return embedder
+
+    _RecordingVectorIndex.embedders = []
+    monkeypatch.setattr(pipeline, "make_default_embedder", _make_embedder)
+    monkeypatch.setattr(pipeline, "TitleVectorIndex", _RecordingVectorIndex)
+
+    pipeline.run_matching(session, llm_client=_UnusedLlm())
+
+    assert len(created) == 1
+    assert _RecordingVectorIndex.embedders == [created[0], created[0]]

@@ -145,6 +145,9 @@ Notes:
   search, then sends the top candidates to OpenAI for verification.
 - No-brand orphan listings are skipped in the expensive vector/LLM phase to
   avoid huge ambiguous pools.
+- Vector search uses a local hashing embedder by default, avoiding Hugging Face
+  downloads during normal runs. To opt into sentence-transformers, set
+  `MATCHING_EMBEDDING_BACKEND=sentence-transformers` and optionally `HF_TOKEN`.
 - Default OpenAI model is configured by `OPENAI_MODEL` in the environment.
 
 ### Commands
