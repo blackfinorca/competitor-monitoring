@@ -22,7 +22,12 @@ def make_engine(settings: Settings):
             conn.execute("PRAGMA journal_mode=WAL")
 
         return engine
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+    )
 
 
 def make_session_factory(settings: Settings) -> sessionmaker[Session]:

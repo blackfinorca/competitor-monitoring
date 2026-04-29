@@ -1,9 +1,12 @@
+import pytest
 from importlib.util import module_from_spec, spec_from_file_location
 import asyncio
 import csv
 import io
 from pathlib import Path
 from unittest.mock import patch
+
+pytest.importorskip("playwright", reason="playwright not installed; skip Allegro scraper tests")
 
 
 def _load_scrape_allegro_module():

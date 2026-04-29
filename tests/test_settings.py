@@ -16,7 +16,7 @@ def test_settings_reads_database_url_from_environment(monkeypatch) -> None:
 def test_load_competitors_reads_yaml_config() -> None:
     competitors = load_competitors(Path("config/competitors.yaml"))
 
-    assert len(competitors) == 7
+    assert len(competitors) == 12
     assert competitors[0]["id"] == "doktorkladivo_sk"
 
 
