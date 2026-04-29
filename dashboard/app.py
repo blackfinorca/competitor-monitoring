@@ -3,7 +3,7 @@
 Pages
 -----
   1. Product Overview   — Landing dashboard with listing volume, freshness and coverage
-  2. Product Search     — Search bar → live fetch / cache → ToolZone card + competitors
+  2. Product Search     — DB-only product and competitor listing search
   3. Recommendations    — Product vs competitor price overview (tile view)
 
 Run with:
@@ -49,15 +49,7 @@ from agnaradie_pricing.db.models import (
     Recommendation,
 )
 from agnaradie_pricing.db.session import make_session_factory
-from agnaradie_pricing.orchestrator import SearchResult, search_product
-from agnaradie_pricing.scrapers.ahprofi import AhProfiScraper
-from agnaradie_pricing.scrapers.boukal import BoukalScraper
-from agnaradie_pricing.scrapers.doktorkladivo import DoktorKladivoScraper
-from agnaradie_pricing.scrapers.ferant import FermatshopScraper
-from agnaradie_pricing.scrapers.naradieshop import NaradieShopScraper
-from agnaradie_pricing.scrapers.rebiop import RebiopScraper
-from agnaradie_pricing.scrapers.strend import StrendproScraper
-from agnaradie_pricing.scrapers.toolzone import ToolZoneScraper
+from agnaradie_pricing.orchestrator import SearchResult, search_product_db_only
 from agnaradie_pricing.settings import Settings, load_competitors, own_store_ids
 
 from dashboard.seller_dashboard_data import load_seller_dashboard_data
@@ -334,32 +326,6 @@ def _competitor_names() -> dict[str, str]:
 def _display_name(cid: str) -> str:
     return _competitor_names().get(cid, cid)
 
-@st.cache_resource
-def _get_toolzone_scraper():
-    cfg = next(
-        (c for c in load_competitors() if c["id"] == "toolzone_sk"),
-        {"id": "toolzone_sk", "url": "https://www.toolzone.sk", "weight": 1.0, "rate_limit_rps": 1},
-    )
-    return ToolZoneScraper(cfg)
-
-@st.cache_resource
-def _get_competitor_scrapers() -> dict:
-    configs = {c["id"]: c for c in load_competitors() if not c.get("own_store")}
-    registry = {
-        "ahprofi_sk": AhProfiScraper,
-        "naradieshop_sk": NaradieShopScraper,
-        "doktorkladivo_sk": DoktorKladivoScraper,
-        "rebiop_sk": RebiopScraper,
-        "boukal_cz": BoukalScraper,
-        "fermatshop_sk": FermatshopScraper,
-        "strendpro_sk": StrendproScraper,
-    }
-    scrapers = {}
-    for cid, cls in registry.items():
-        if cid in configs:
-            scrapers[cid] = cls(configs[cid])
-    return scrapers
-
 def _get_llm_client():
     # Not cached — re-read env on every call so .env changes take effect
     # without restarting the server. OpenAIClient is lightweight to construct.
@@ -545,13 +511,12 @@ def _product_search_match_lookup(
 def _render_search_tab() -> None:
     st.header("Product Search")
     st.caption(
-        "Enter an EAN, MPN, or product name. "
-        "Cached results (< 30 days) load instantly; everything else is fetched live."
+        "Enter an EAN, MPN, SKU, or product name. Search runs only against the local DB."
     )
 
     # --- Search form ---------------------------------------------------------
     with st.form("search_form", clear_on_submit=False):
-        col_input, col_btn, col_refresh = st.columns([5, 1, 1])
+        col_input, col_btn = st.columns([5, 1])
         with col_input:
             query = st.text_input(
                 "Query",
@@ -561,49 +526,28 @@ def _render_search_tab() -> None:
             )
         with col_btn:
             submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
-        with col_refresh:
-            refresh = st.form_submit_button(
-                "Refresh",
-                use_container_width=True,
-                help="Re-fetch live data even if the cache is fresh",
-            )
 
     # --- Run search ----------------------------------------------------------
     run_query = query.strip()
 
-    should_search = (submitted or refresh) and run_query
-    force_refresh = bool(refresh)
+    should_search = submitted and run_query
 
-    if (submitted or refresh) and not run_query:
+    if submitted and not run_query:
         st.session_state.pop("search_result", None)
         st.session_state["last_query"] = ""
 
     if should_search:
         st.session_state["last_query"] = run_query
 
-        progress_messages: list[str] = []
-
-        with st.status("Searching…", expanded=True) as status_box:
-            def _on_progress(msg: str) -> None:
-                st.write(msg)
-                progress_messages.append(msg)
-
+        with st.spinner("Searching local database…"):
             try:
                 with _session() as session:
-                    result: SearchResult = search_product(
+                    result: SearchResult = search_product_db_only(
                         run_query,
                         session,
-                        competitor_scrapers=_get_competitor_scrapers(),
-                        toolzone_scraper=_get_toolzone_scraper(),
-                        llm_client=_get_llm_client(),
-                        force_refresh=force_refresh,
-                        on_progress=_on_progress,
                     )
                 st.session_state["search_result"] = result
-                label = "From cache" if result.from_cache else "Done"
-                status_box.update(label=label, state="complete", expanded=False)
             except Exception as exc:
-                status_box.update(label=f"Error: {exc}", state="error")
                 st.exception(exc)
                 return
 
@@ -624,9 +568,7 @@ def _render_search_tab() -> None:
             for cid, msg in result.errors.items():
                 st.caption(f"**{_display_name(cid)}**: {msg}")
 
-    # Cache badge
-    if result.from_cache:
-        st.caption("Showing cached results  —  press **Refresh** to re-fetch live data.")
+    st.caption("Showing local DB results only.")
 
     product = result.product
     tz_row = result.tz_listing
@@ -722,10 +664,7 @@ def _render_search_tab() -> None:
 
         if not comp_listings:
             st.subheader("Competitor Prices")
-            st.info(
-                "No competitor matches found. "
-                "Try pressing **Refresh** to run a fresh live search."
-            )
+            st.info("No approved competitor matches found in the local database.")
         else:
             n = len(comp_listings)
             st.subheader(f"Competitor Prices — {n} match{'es' if n != 1 else ''}")
@@ -1122,6 +1061,19 @@ def _build_lower_price_rate_frame(
     return pd.DataFrame(rows)
 
 
+def _product_overview_competitor_scopes(
+    configs: list[dict],
+    own_ids: set[str] | frozenset[str],
+) -> tuple[set[str], set[str]]:
+    competitor_ids = {
+        c["id"]
+        for c in configs
+        if c["id"] not in own_ids and not c.get("own_store", False)
+    }
+    overlap_ids = {c["id"] for c in configs}
+    return competitor_ids, overlap_ids
+
+
 def _build_product_overlap_frames(
     membership_df: pd.DataFrame,
     competitor_ids: set[str] | frozenset[str],
@@ -1406,20 +1358,17 @@ def _load_product_overview_data() -> dict:
     match_df = pd.DataFrame(match_counts, columns=["competitor_id", "matches"])
     membership_df = pd.DataFrame(membership_rows, columns=["cluster_id", "competitor_id", "price_eur"])
 
+    all_configs = load_competitors()
     own_ids = own_store_ids()
-    competitor_ids = {
-        c["id"]
-        for c in load_competitors()
-        if c["id"] not in own_ids and not c.get("own_store", False)
-    }
+    competitor_ids, overlap_ids = _product_overview_competitor_scopes(all_configs, own_ids)
     lower_price_df = _build_lower_price_rate_frame(membership_df, competitor_ids)
     product_count_df, _ = _build_product_overlap_frames(membership_df, competitor_ids)
     overlap_nodes_df, overlap_edges_df = _build_product_overlap_layout(
-        membership_df, competitor_ids
+        membership_df, overlap_ids
     )
 
     all_df = _build_product_overview_frame(
-        all_configs=load_competitors(),
+        all_configs=all_configs,
         all_time_df=all_time_df,
         fresh_df=fresh_df,
         match_df=match_df,

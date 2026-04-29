@@ -54,6 +54,8 @@ class CompetitorListing(Base):
     __table_args__ = (
         Index("idx_cl_competitor_scraped", "competitor_id", "scraped_at"),
         Index("idx_cl_brand_mpn", "brand", "mpn"),
+        Index("idx_cl_ean", "ean"),
+        Index("idx_cl_competitor_sku", "competitor_sku"),
         UniqueConstraint("competitor_id", "url", name="uq_cl_competitor_url"),
     )
 

@@ -306,3 +306,119 @@ def test_latest_competitor_listings_deduplicates_to_newest_per_competitor() -> N
     rows = orchestrator._latest_competitor_listings(product.id, session)
 
     assert new_listing.id in [r.id for r in rows]
+
+
+def test_search_product_db_only_finds_product_and_all_db_matches_by_ean() -> None:
+    session = _session()
+    product = Product(
+        sku="TZ-Cobra-250",
+        brand="Knipex",
+        ean="4003773022022",
+        title="Kliešte SIKO Cobra 250 mm KNIPEX",
+    )
+    toolzone_listing = CompetitorListing(
+        competitor_id="toolzone_sk",
+        brand="Knipex",
+        ean="4003773022022",
+        title="Kliešte SIKO Cobra 250 mm KNIPEX",
+        price_eur=Decimal("22.05"),
+        currency="EUR",
+        scraped_at=datetime.now(UTC),
+        url="https://toolzone.test/cobra",
+    )
+    competitor_one = CompetitorListing(
+        competitor_id="ahprofi_sk",
+        brand="Knipex",
+        ean="4003773022022",
+        title="KNIPEX Cobra 250",
+        price_eur=Decimal("21.50"),
+        currency="EUR",
+        scraped_at=datetime.now(UTC),
+        url="https://ahprofi.test/cobra",
+    )
+    competitor_two = CompetitorListing(
+        competitor_id="doktorkladivo_sk",
+        brand="Knipex",
+        ean="4003773022022",
+        title="KNIPEX Cobra 250",
+        price_eur=Decimal("23.40"),
+        currency="EUR",
+        scraped_at=datetime.now(UTC) - timedelta(days=90),
+        url="https://doktorkladivo.test/cobra",
+    )
+    session.add_all([product, toolzone_listing, competitor_one, competitor_two])
+    session.flush()
+    session.add_all([
+        ProductMatch(
+            listing_id=toolzone_listing.id,
+            product_id=product.id,
+            match_type="exact_ean",
+            confidence=Decimal("1.00"),
+            status="approved",
+        ),
+        ProductMatch(
+            listing_id=competitor_one.id,
+            product_id=product.id,
+            match_type="exact_ean",
+            confidence=Decimal("1.00"),
+            status="approved",
+        ),
+        ProductMatch(
+            listing_id=competitor_two.id,
+            product_id=product.id,
+            match_type="exact_ean",
+            confidence=Decimal("1.00"),
+            status="approved",
+        ),
+    ])
+    session.commit()
+
+    result = orchestrator.search_product_db_only("4003773022022", session)
+
+    assert result.product is not None
+    assert result.product.id == product.id
+    assert result.tz_listing is not None
+    assert result.tz_listing.id == toolzone_listing.id
+    assert {row.id for row in result.competitor_hits} == {
+        competitor_one.id,
+        competitor_two.id,
+    }
+    assert result.from_cache is True
+
+
+def test_search_product_db_only_can_start_from_competitor_listing_ean() -> None:
+    session = _session()
+    product = Product(
+        sku="derived-ean-4003773022022",
+        brand="Knipex",
+        ean=None,
+        title="Derived KNIPEX Cobra product",
+    )
+    listing = CompetitorListing(
+        competitor_id="ahprofi_sk",
+        brand="Knipex",
+        ean="4003773022022",
+        title="KNIPEX Cobra 250",
+        price_eur=Decimal("21.50"),
+        currency="EUR",
+        scraped_at=datetime.now(UTC),
+        url="https://ahprofi.test/cobra",
+    )
+    session.add_all([product, listing])
+    session.flush()
+    session.add(
+        ProductMatch(
+            listing_id=listing.id,
+            product_id=product.id,
+            match_type="exact_ean",
+            confidence=Decimal("1.00"),
+            status="approved",
+        )
+    )
+    session.commit()
+
+    result = orchestrator.search_product_db_only("4003773022022", session)
+
+    assert result.product is not None
+    assert result.product.id == product.id
+    assert [row.id for row in result.competitor_hits] == [listing.id]

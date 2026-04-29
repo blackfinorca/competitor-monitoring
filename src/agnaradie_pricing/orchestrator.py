@@ -33,7 +33,7 @@ from decimal import Decimal
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from agnaradie_pricing.catalogue.normalise import fold_diacritics, normalise_ean
@@ -217,6 +217,32 @@ def search_product(
     return result
 
 
+def search_product_db_only(
+    query: str,
+    session: Session,
+    *,
+    result_limit: int = 200,
+) -> SearchResult:
+    """Search only local DB rows; never calls scrapers or LLM clients."""
+    query = _normalise_search_query(query)
+    result = SearchResult(query=query, from_cache=True)
+
+    product = _find_product_db_only(query, session)
+    if product is None:
+        return result
+
+    result.product = product
+    result.tz_listing = _latest_tz_listing(product.id, session)
+    result.competitor_hits = _db_product_competitor_listings(
+        product.id,
+        session,
+        limit=result_limit,
+    )
+    result.matches = _product_matches(product.id, session)
+    result.match_info = _product_match_info(product.id, session)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
@@ -262,6 +288,141 @@ def _find_product(query: str, session: Session) -> Product | None:
         return product
 
     return _find_product_by_text(q, session)
+
+
+def _find_product_db_only(query: str, session: Session) -> Product | None:
+    q = _normalise_search_query(query)
+    kind = _classify_query(q)
+
+    product: Product | None = None
+    if kind == "ean":
+        product = _preferred_product_by_ean(q, session)
+        if product is None:
+            product = _product_from_listing_identifier(q, session, "ean")
+        return product
+
+    lowered = q.lower()
+    product = session.execute(
+        select(Product)
+        .where(func.lower(Product.sku) == lowered)
+        .order_by(Product.updated_at.desc(), Product.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if product is not None:
+        return _preferred_product_by_ean(product.ean, session) if product.ean else product
+
+    product = session.execute(
+        select(Product)
+        .where(func.lower(Product.mpn) == lowered)
+        .order_by(Product.updated_at.desc(), Product.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if product is not None:
+        return _preferred_product_by_ean(product.ean, session) if product.ean else product
+
+    product = _product_from_listing_identifier(q, session, "competitor_sku")
+    if product is not None:
+        return product
+    product = _product_from_listing_identifier(q, session, "mpn")
+    if product is not None:
+        return product
+
+    return _find_product_by_text_db_only(q, session)
+
+
+def _product_from_listing_identifier(
+    query: str,
+    session: Session,
+    column_name: str,
+) -> Product | None:
+    column = getattr(DBListing, column_name)
+    row = session.execute(
+        select(Product)
+        .join(ProductMatch, ProductMatch.product_id == Product.id)
+        .join(DBListing, DBListing.id == ProductMatch.listing_id)
+        .where(
+            ProductMatch.status == "approved",
+            func.lower(column) == query.lower(),
+        )
+        .order_by(DBListing.scraped_at.desc(), Product.updated_at.desc(), Product.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is not None and row.ean:
+        return _preferred_product_by_ean(row.ean, session) or row
+    return row
+
+
+def _find_product_by_text_db_only(query: str, session: Session) -> Product | None:
+    tokens = _text_tokens(query)
+    if not tokens:
+        return None
+
+    candidate_products = _product_text_candidates(query, tokens, session)
+    product, score = _best_text_product(candidate_products, tokens, fold_diacritics(query.lower()))
+    if product is not None and score and score[0] > 0:
+        return _preferred_product_by_ean(product.ean, session) if product.ean else product
+
+    listing_product = _product_from_listing_text(query, tokens, session)
+    if listing_product is not None:
+        return _preferred_product_by_ean(listing_product.ean, session) if listing_product.ean else listing_product
+
+    return None
+
+
+def _product_text_candidates(
+    query: str,
+    tokens: list[str],
+    session: Session,
+) -> list[Product]:
+    lowered_query = query.lower()
+    phrase_filter = func.lower(Product.title).like(f"%{lowered_query}%")
+    token_filters = []
+    for token in tokens:
+        pattern = f"%{token}%"
+        token_filter = or_(
+            func.lower(Product.title).like(pattern),
+            func.lower(Product.brand).like(pattern),
+            func.lower(Product.mpn).like(pattern),
+            func.lower(Product.sku).like(pattern),
+        )
+        token_filters.append(token_filter)
+    return list(session.execute(
+        select(Product)
+        .where(or_(phrase_filter, and_(*token_filters)))
+        .order_by(Product.updated_at.desc(), Product.id.desc())
+        .limit(200)
+    ).scalars().all())
+
+
+def _product_from_listing_text(
+    query: str,
+    tokens: list[str],
+    session: Session,
+) -> Product | None:
+    lowered_query = query.lower()
+    phrase_filter = func.lower(DBListing.title).like(f"%{lowered_query}%")
+    token_filters = []
+    for token in tokens:
+        pattern = f"%{token}%"
+        token_filters.append(or_(
+            func.lower(DBListing.title).like(pattern),
+            func.lower(DBListing.brand).like(pattern),
+            func.lower(DBListing.mpn).like(pattern),
+            func.lower(DBListing.competitor_sku).like(pattern),
+            func.lower(DBListing.ean).like(pattern),
+        ))
+
+    return session.execute(
+        select(Product)
+        .join(ProductMatch, ProductMatch.product_id == Product.id)
+        .join(DBListing, DBListing.id == ProductMatch.listing_id)
+        .where(
+            ProductMatch.status == "approved",
+            or_(phrase_filter, and_(*token_filters)),
+        )
+        .order_by(DBListing.scraped_at.desc(), Product.updated_at.desc(), Product.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def _preferred_product_by_ean(ean: str, session: Session) -> Product | None:
@@ -400,6 +561,26 @@ def _latest_competitor_listings(product_id: int, session: Session) -> list[DBLis
             seen.add(row.competitor_id)
             result.append(row)
     return result
+
+
+def _db_product_competitor_listings(
+    product_id: int,
+    session: Session,
+    *,
+    limit: int,
+) -> list[DBListing]:
+    """Return approved non-ToolZone DB listings for the product without freshness filtering."""
+    return list(session.execute(
+        select(DBListing)
+        .join(ProductMatch, ProductMatch.listing_id == DBListing.id)
+        .where(
+            ProductMatch.product_id == product_id,
+            ProductMatch.status == "approved",
+            DBListing.competitor_id != "toolzone_sk",
+        )
+        .order_by(DBListing.price_eur.asc(), DBListing.scraped_at.desc(), DBListing.id.desc())
+        .limit(limit)
+    ).scalars().all())
 
 
 def _latest_tz_listing(product_id: int, session: Session) -> DBListing | None:

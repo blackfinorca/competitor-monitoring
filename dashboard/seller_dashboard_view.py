@@ -10,6 +10,8 @@ from collections import defaultdict
 from statistics import median
 from typing import Any
 
+_PRICE_REVIEW_GAP_PCT = 300.0
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers                                                                #
@@ -39,9 +41,15 @@ def _index_offers(offers: list[dict]) -> tuple[dict[str, list[dict]], dict[str, 
     return by_ean, by_seller
 
 
-def compute_per_sku(data: dict, ref: str) -> list[dict]:
+def compute_per_sku(
+    data: dict,
+    ref: str,
+    comparison_sellers: set[str] | None = None,
+) -> list[dict]:
     by_ean, by_seller = _index_offers(data.get("offers", []))
     titles = data.get("titles", {})
+    own_store_ids = set(data.get("own_store_ids") or [])
+    comparison_sellers = set(comparison_sellers) if comparison_sellers is not None else None
     rows: list[dict] = []
     for o in by_seller.get(ref, []):
         all_on_ean = by_ean.get(o["e"], [])
@@ -49,7 +57,9 @@ def compute_per_sku(data: dict, ref: str) -> list[dict]:
         others_count = 0
         others: list[str] = []
         for x in all_on_ean:
-            if x["s"] == ref:
+            if x["s"] == ref or x["s"] in own_store_ids:
+                continue
+            if comparison_sellers is not None and x["s"] not in comparison_sellers:
                 continue
             others_count += 1
             others.append(x["s"])
@@ -60,6 +70,7 @@ def compute_per_sku(data: dict, ref: str) -> list[dict]:
             if best_other and best_other["t"]
             else None
         )
+        price_outlier = gap is not None and abs(gap) >= _PRICE_REVIEW_GAP_PCT
         rows.append(
             {
                 "ean": o["e"],
@@ -72,6 +83,7 @@ def compute_per_sku(data: dict, ref: str) -> list[dict]:
                 "compCount": others_count,
                 "compSellers": others,
                 "gapPct": gap,
+                "priceOutlier": price_outlier,
                 "bucket": bucket_code(gap),
             }
         )
@@ -85,7 +97,42 @@ def price_scatter_rows(per_sku: list[dict]) -> list[dict]:
         if r.get("refTotal") is not None
         and r.get("bestTotal") is not None
         and r.get("gapPct") is not None
+        and not r.get("priceOutlier")
     ]
+
+
+def selected_scatter_point(event: Any) -> dict[str, Any] | None:
+    """Extract copy-friendly SKU details from a Streamlit Plotly selection event."""
+    if not event:
+        return None
+    selection = event.get("selection") if isinstance(event, dict) else getattr(event, "selection", None)
+    if not selection:
+        return None
+    points = selection.get("points") if isinstance(selection, dict) else getattr(selection, "points", None)
+    if not points:
+        return None
+    point = points[0]
+    customdata = point.get("customdata") if isinstance(point, dict) else getattr(point, "customdata", None)
+    if not customdata or len(customdata) < 6:
+        return None
+    point_index = None
+    if isinstance(point, dict):
+        point_index = point.get("point_index", point.get("pointNumber"))
+    else:
+        point_index = getattr(point, "point_index", getattr(point, "pointNumber", None))
+    return {
+        "point_index": point_index,
+        "ean": customdata[0],
+        "title": customdata[1],
+        "bestSeller": customdata[2],
+        "refTotal": customdata[3],
+        "bestTotal": customdata[4],
+        "gapPct": customdata[5],
+    }
+
+
+def scatter_selected_style() -> dict[str, dict[str, Any]]:
+    return {"marker": {"size": 12, "opacity": 1.0}}
 
 
 def head_to_head_rows(data: dict, ref: str) -> list[dict]:
@@ -219,6 +266,7 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
 
     top_sellers: list[str] = list(data.get("top_sellers") or [])
     all_sellers: list[str] = list(data.get("all_sellers") or [])
+    own_store_ids_for_ui = set(data.get("own_store_ids") or [])
 
     if not top_sellers:
         st.info("No top sellers in this snapshot.")
@@ -239,10 +287,19 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
         horizontal=True,
         key=ref_key,
     )
+    comparison_options = [
+        seller for seller in all_sellers
+        if seller != ref and seller not in own_store_ids_for_ui
+    ]
+    current_comparison = [
+        seller for seller in st.session_state[hl_key] if seller in comparison_options
+    ]
+    if current_comparison != st.session_state[hl_key]:
+        st.session_state[hl_key] = current_comparison
     highlighted_list = st.multiselect(
-        "Highlight competitors",
-        all_sellers,
-        default=st.session_state[hl_key],
+        "Compare competitors",
+        comparison_options,
+        default=current_comparison,
         key=hl_key,
     )
     highlighted = set(highlighted_list)
@@ -304,16 +361,69 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
     )
     st.plotly_chart(bucket_fig, use_container_width=True)
 
-    # -- 5. Reference vs cheapest competitor scatter ----------------------- #
-    st.subheader(f"2. {ref} vs cheapest competitor")
-    scatter_rows = price_scatter_rows(per_sku)
+    # -- 5. Reference vs selected competitors scatter ---------------------- #
+    st.subheader(f"2. {ref} vs selected competitors")
+    scatter_per_sku = (
+        compute_per_sku(data, ref, comparison_sellers=highlighted)
+        if highlighted
+        else []
+    )
+    price_review_rows = sorted(
+        [r for r in scatter_per_sku if r.get("priceOutlier")],
+        key=lambda r: abs(float(r.get("gapPct") or 0.0)),
+        reverse=True,
+    )
+    if price_review_rows:
+        st.warning(
+            f"{len(price_review_rows):,} SKUs exceed +/-{_PRICE_REVIEW_GAP_PCT:.0f}% "
+            "versus the selected competitors. They are excluded from the scatter scale "
+            "and listed here for match/unit-price review."
+        )
+        with st.expander("Flagged price gaps", expanded=True):
+            st.dataframe(
+                [
+                    {
+                        "EAN": r["ean"],
+                        "Title": r["title"],
+                        f"{ref} total": _fmt_eur(r["refTotal"]),
+                        "Selected competitor": r["bestSeller"],
+                        "Competitor total": _fmt_eur(r["bestTotal"]),
+                        "Gap": _fmt_pct(r["gapPct"]),
+                    }
+                    for r in price_review_rows[:100]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+            if len(price_review_rows) > 100:
+                st.caption(f"Showing the largest 100 of {len(price_review_rows):,} flagged SKUs.")
+
+    scatter_rows = price_scatter_rows(scatter_per_sku)
     if scatter_rows:
+        selected_key = f"seller_scatter_selected_{ref}"
+        stored_selection = st.session_state.get(selected_key)
+        selectedpoints = (
+            [stored_selection["point_index"]]
+            if stored_selection and stored_selection.get("point_index") is not None
+            else None
+        )
         colors = [_BUCKET_COLORS[r["bucket"]] for r in scatter_rows]
+        customdata = [
+            [
+                r["ean"],
+                r["title"],
+                r["bestSeller"],
+                r["refTotal"],
+                r["bestTotal"],
+                r["gapPct"],
+            ]
+            for r in scatter_rows
+        ]
         hover = [
             (
                 f"EAN: {r['ean']}<br>"
                 f"{ref}: {r['refTotal']:.2f} EUR<br>"
-                f"Best rival: {_tick(r['bestSeller'] or '-', highlighted)} @ {r['bestTotal']:.2f} EUR<br>"
+                f"Selected rival: {_tick(r['bestSeller'] or '-', highlighted)} @ {r['bestTotal']:.2f} EUR<br>"
                 f"Gap: {r['gapPct']:.1f}%<br>"
                 f"Rivals: {r['compCount']}"
             )
@@ -329,7 +439,11 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
                 x=[r["bestTotal"] for r in scatter_rows],
                 y=[r["refTotal"] for r in scatter_rows],
                 mode="markers",
-                marker=dict(color=colors, size=6, opacity=0.65, line=dict(width=0)),
+                marker=dict(color=colors, size=7, opacity=0.68, line=dict(width=0)),
+                selected=scatter_selected_style(),
+                unselected=dict(marker=dict(opacity=0.32)),
+                customdata=customdata,
+                selectedpoints=selectedpoints,
                 text=hover,
                 hoverinfo="text",
                 name="SKUs",
@@ -349,13 +463,47 @@ def render_seller_dashboard(data: dict, theme: dict | None = None) -> None:
             **chart_base_layout,
             height=540,
             margin=dict(l=60, r=20, t=30, b=50),
-            xaxis={**chart_xaxis, "title": "Cheapest competitor total (EUR)", "type": "log"},
+            xaxis={**chart_xaxis, "title": "Selected competitor total (EUR)", "type": "log"},
             yaxis={**chart_yaxis, "title": f"{ref} total (EUR)", "type": "log"},
             showlegend=False,
+            clickmode="event+select",
         )
-        st.plotly_chart(scatter_fig, use_container_width=True)
+        scatter_event = st.plotly_chart(
+            scatter_fig,
+            use_container_width=True,
+            key=f"seller_scatter_{ref}",
+            on_select="rerun",
+            selection_mode="points",
+            config={"displayModeBar": True},
+        )
+        selected_point = selected_scatter_point(scatter_event)
+        if selected_point:
+            st.session_state[selected_key] = selected_point
+        selected_point = st.session_state.get(selected_key)
+        if selected_point:
+            cols = st.columns([1.2, 2.2, 1, 1, 1])
+            selected_ean = str(selected_point["ean"])
+            cols[0].text_input(
+                "Selected EAN",
+                selected_ean,
+                key=f"selected_ean_{ref}_{selected_ean}",
+            )
+            cols[1].text_input(
+                "Selected title",
+                selected_point["title"],
+                key=f"selected_title_{ref}_{selected_ean}",
+            )
+            cols[2].metric(f"{ref} total", _fmt_eur(selected_point["refTotal"]))
+            cols[3].metric(
+                selected_point["bestSeller"] or "Best competitor",
+                _fmt_eur(selected_point["bestTotal"]),
+            )
+            cols[4].metric("Gap", _fmt_pct(selected_point["gapPct"]))
     else:
-        st.info("No comparable SKUs to plot.")
+        if highlighted:
+            st.info("No comparable SKUs for the selected competitors.")
+        else:
+            st.info("Select one or more competitors above to plot this comparison.")
 
     # -- 6. Head-to-head --------------------------------------------------- #
     st.subheader(f"3. Head-to-head - {ref} vs other top sellers")

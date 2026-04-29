@@ -18,6 +18,7 @@ def _load_compare_helpers():
         "_build_product_overlap_frames",
         "_build_product_overlap_layout",
         "_build_lower_price_rate_frame",
+        "_product_overview_competitor_scopes",
         "_compare_brand_match_counts",
         "_dashboard_theme_css",
         "_dashboard_theme_tokens",
@@ -35,6 +36,22 @@ def _load_compare_helpers():
     namespace: dict[str, object] = {"pd": pd}
     exec(compile(module, str(app_path), "exec"), namespace)
     return namespace
+
+
+def test_product_overview_overlap_scope_includes_own_store() -> None:
+    helpers = _load_compare_helpers()
+
+    competitor_ids, overlap_ids = helpers["_product_overview_competitor_scopes"](
+        [
+            {"id": "toolzone_sk", "own_store": True},
+            {"id": "agi_sk"},
+            {"id": "madmat_sk", "own_store": False},
+        ],
+        {"toolzone_sk"},
+    )
+
+    assert competitor_ids == {"agi_sk", "madmat_sk"}
+    assert overlap_ids == {"toolzone_sk", "agi_sk", "madmat_sk"}
 
 
 def test_available_compare_brands_are_sorted_and_unique() -> None:

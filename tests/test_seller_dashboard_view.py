@@ -71,6 +71,69 @@ def test_compute_per_sku_signs_and_buckets():
     assert e3["bucket"] == "M"
 
 
+def test_compute_per_sku_uses_competitors_not_own_store_as_best_rival():
+    data = {
+        "own_store_ids": ["toolzone_sk"],
+        "top_sellers": ["agi_sk", "toolzone_sk", "rival"],
+        "all_sellers": ["agi_sk", "toolzone_sk", "rival"],
+        "titles": {"E1": "abrasive disc"},
+        "offers": [
+            {"e": "E1", "s": "agi_sk", "p": 100.0, "d": None, "t": 100.0},
+            {"e": "E1", "s": "toolzone_sk", "p": 1.0, "d": None, "t": 1.0},
+            {"e": "E1", "s": "rival", "p": 80.0, "d": None, "t": 80.0},
+        ],
+    }
+
+    row = v.compute_per_sku(data, "agi_sk")[0]
+
+    assert row["bestSeller"] == "rival"
+    assert row["bestTotal"] == 80.0
+    assert row["gapPct"] == 25.0
+    assert row["compCount"] == 1
+    assert row["compSellers"] == ["rival"]
+
+
+def test_compute_per_sku_limits_best_rival_to_selected_competitors():
+    data = {
+        "top_sellers": ["agi_sk", "cheap_unselected", "selected_rival"],
+        "all_sellers": ["agi_sk", "cheap_unselected", "selected_rival"],
+        "titles": {"E1": "abrasive disc"},
+        "offers": [
+            {"e": "E1", "s": "agi_sk", "p": 100.0, "d": None, "t": 100.0},
+            {"e": "E1", "s": "cheap_unselected", "p": 1.0, "d": None, "t": 1.0},
+            {"e": "E1", "s": "selected_rival", "p": 80.0, "d": None, "t": 80.0},
+        ],
+    }
+
+    row = v.compute_per_sku(data, "agi_sk", comparison_sellers={"selected_rival"})[0]
+
+    assert row["bestSeller"] == "selected_rival"
+    assert row["bestTotal"] == 80.0
+    assert row["gapPct"] == 25.0
+    assert row["compCount"] == 1
+    assert row["compSellers"] == ["selected_rival"]
+
+
+def test_compute_per_sku_flags_large_price_outliers_for_review():
+    data = {
+        "top_sellers": ["ref", "rival"],
+        "all_sellers": ["ref", "rival"],
+        "titles": {"E1": "huge gap", "E2": "normal gap"},
+        "offers": [
+            {"e": "E1", "s": "ref", "p": 500.0, "d": None, "t": 500.0},
+            {"e": "E1", "s": "rival", "p": 100.0, "d": None, "t": 100.0},
+            {"e": "E2", "s": "ref", "p": 120.0, "d": None, "t": 120.0},
+            {"e": "E2", "s": "rival", "p": 100.0, "d": None, "t": 100.0},
+        ],
+    }
+
+    rows = {r["ean"]: r for r in v.compute_per_sku(data, "ref")}
+
+    assert rows["E1"]["gapPct"] == 400.0
+    assert rows["E1"]["priceOutlier"] is True
+    assert rows["E2"]["priceOutlier"] is False
+
+
 def test_price_scatter_rows_require_all_formatted_values():
     rows = [
         {
@@ -91,9 +154,59 @@ def test_price_scatter_rows_require_all_formatted_values():
             "bestTotal": 10.0,
             "gapPct": 20.0,
         },
+        {
+            "ean": "E4",
+            "refTotal": 500.0,
+            "bestTotal": 100.0,
+            "gapPct": 400.0,
+            "priceOutlier": True,
+        },
     ]
 
     assert v.price_scatter_rows(rows) == [rows[2]]
+
+
+def test_selected_scatter_point_extracts_clicked_point_customdata():
+    event = {
+        "selection": {
+            "points": [
+                {
+                    "point_index": 2,
+                    "customdata": [
+                        "4003773022022",
+                        "Knipex Cobra",
+                        "rival",
+                        12.5,
+                        10.0,
+                        25.0,
+                    ],
+                }
+            ]
+        }
+    }
+
+    selected = v.selected_scatter_point(event)
+
+    assert selected == {
+        "point_index": 2,
+        "ean": "4003773022022",
+        "title": "Knipex Cobra",
+        "bestSeller": "rival",
+        "refTotal": 12.5,
+        "bestTotal": 10.0,
+        "gapPct": 25.0,
+    }
+
+
+def test_selected_scatter_point_returns_none_without_selection():
+    assert v.selected_scatter_point({"selection": {"points": []}}) is None
+    assert v.selected_scatter_point(None) is None
+
+
+def test_selected_marker_style_is_valid_for_plotly_scatter():
+    import plotly.graph_objects as go
+
+    go.Scatter(selected=v.scatter_selected_style())
 
 
 def test_plotly_layout_for_theme_defaults_and_switches_templates():

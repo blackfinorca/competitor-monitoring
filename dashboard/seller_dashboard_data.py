@@ -20,7 +20,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from agnaradie_pricing.db.session import make_session_factory  # noqa: E402
-from agnaradie_pricing.settings import Settings  # noqa: E402
+from agnaradie_pricing.settings import Settings, own_store_ids  # noqa: E402
 
 
 _SQL = text(
@@ -66,6 +66,7 @@ def load_seller_dashboard_data(
             "seller_stats": {},
             "titles": {},
             "offers": [],
+            "own_store_ids": sorted(own_store_ids()),
         }
 
     df["price_eur"] = pd.to_numeric(df["price_eur"], errors="coerce")
@@ -140,4 +141,5 @@ def load_seller_dashboard_data(
         "seller_stats": seller_stats,
         "titles": titles,
         "offers": offers,
+        "own_store_ids": sorted(own_store_ids()),
     }
